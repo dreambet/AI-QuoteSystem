@@ -14,3 +14,13 @@ export const quoteApi = {
   export: (id) => window.open(`${API_BASE}/${id}/export`)
 };
 
+export const uploadApi = {
+  uploadDrawing: (file) => {
+    const formData = new FormData();
+    formData.append('drawing', file);
+    return axios.post('/api/upload/drawing', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    });
+  }
+};
+

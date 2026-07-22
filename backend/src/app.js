@@ -2,6 +2,7 @@
 const express = require('express');
 const cors = require('cors');
 const quotesRouter = require('./routes/quotes');
+const uploadRouter = require('./routes/upload');
 
 const app = express();
 
@@ -14,6 +15,7 @@ app.get('/health', (req, res) => {
 });
 
 app.use('/api/quotes', quotesRouter);
+app.use('/api/upload', uploadRouter);
 
 module.exports = app;
 

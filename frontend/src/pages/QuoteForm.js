@@ -1,7 +1,7 @@
 
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { quoteApi } from '../api/quotes';
+import { quoteApi, uploadApi } from '../api/quotes';
 
 function QuoteForm() {
   const navigate = useNavigate();
@@ -17,15 +17,33 @@ function QuoteForm() {
     deliveryDate: '',
     precision: '中等'
   });
+  const [selectedFile, setSelectedFile] = useState(null);
+  const [uploadedPath, setUploadedPath] = useState(null);
 
   const handleChange = (e) => {
     setFormData({ ...formData, [e.target.name]: e.target.value });
   };
 
+  const handleFileChange = (e) => {
+    setSelectedFile(e.target.files[0]);
+  };
+
+  const handleFileUpload = async () => {
+    if (!selectedFile) return;
+    try {
+      const response = await uploadApi.uploadDrawing(selectedFile);
+      setUploadedPath(response.data.filename);
+      alert('上传成功!');
+    } catch (error) {
+      alert('上传失败: ' + error.message);
+    }
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     try {
-      const response = await quoteApi.create(formData);
+      const data = { ...formData, drawingPath: uploadedPath };
+      const response = await quoteApi.create(data);
       navigate(`/quotes/${response.data.id}`);
     } catch (error) {
       alert('创建失败: ' + error.message);
@@ -159,6 +177,25 @@ function QuoteForm() {
             &lt;option value="高"&gt;高&lt;/option&gt;
             &lt;option value="极高"&gt;极高&lt;/option&gt;
           &lt;/select&gt;
+        &lt;/div&gt;
+
+        &lt;div style={{ marginBottom: '20px' }}&gt;
+          &lt;label&gt;图纸上传&lt;/label&gt;
+          &lt;div style={{ marginTop: '10px' }}&gt;
+            &lt;input type="file" onChange={handleFileChange} accept=".pdf,.png,.jpg,.jpeg,.dxf" /&gt;
+            {selectedFile &amp;&amp; !uploadedPath &amp;&amp; (
+              &lt;button
+                onClick={handleFileUpload}
+                type="button"
+                style={{ marginLeft: '10px', padding: '8px 16px' }}
+              &gt;
+                上传
+              &lt;/button&gt;
+            )}
+            {uploadedPath &amp;&amp; (
+              &lt;p style={{ color: 'green', marginTop: '5px' }}&gt;✓ 已上传&lt;/p&gt;
+            )}
+          &lt;/div&gt;
         &lt;/div&gt;
 
         &lt;button
