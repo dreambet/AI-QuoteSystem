@@ -2,6 +2,8 @@
 import React from 'react';
 import { BrowserRouter as Router, Routes, Route, Link } from 'react-router-dom';
 import QuoteForm from './pages/QuoteForm';
+import QuoteList from './pages/QuoteList';
+import QuoteDetail from './pages/QuoteDetail';
 import './App.css';
 
 function App() {
@@ -17,8 +19,10 @@ function App() {
         &lt;/header&gt;
         &lt;main&gt;
           &lt;Routes&gt;
-            &lt;Route path="/" element={&lt;div&gt;&lt;h2&gt;欢迎使用机加工报价系统&lt;/h2&gt;&lt;/div&gt;} /&gt;
+            &lt;Route path="/" element={&lt;QuoteList /&gt;} /&gt;
+            &lt;Route path="/quotes" element={&lt;QuoteList /&gt;} /&gt;
             &lt;Route path="/quotes/new" element={&lt;QuoteForm /&gt;} /&gt;
+            &lt;Route path="/quotes/:id" element={&lt;QuoteDetail /&gt;} /&gt;
           &lt;/Routes&gt;
         &lt;/main&gt;
       &lt;/div&gt;
