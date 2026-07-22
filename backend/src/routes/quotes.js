@@ -3,6 +3,7 @@ const express = require('express');
 const router = express.Router();
 const Quote = require('../models/Quote');
 const QuoteCalculator = require('../services/QuoteCalculator');
+const AIReviewer = require('../services/AIReviewer');
 
 router.post('/', async (req, res) => {
   try {
@@ -54,6 +55,25 @@ router.post('/:id/calculate', async (req, res) => {
     const updatedQuote = await Quote.update(req.params.id, {
       calculation,
       status: 'calculated'
+    });
+
+    res.json(updatedQuote);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.post('/:id/ai-review', async (req, res) => {
+  try {
+    const quote = await Quote.findById(req.params.id);
+    if (!quote) {
+      return res.status(404).json({ error: 'Quote not found' });
+    }
+
+    const aiReview = AIReviewer.review(quote);
+    const updatedQuote = await Quote.update(req.params.id, {
+      aiReview,
+      status: 'ai_reviewed'
     });
 
     res.json(updatedQuote);
