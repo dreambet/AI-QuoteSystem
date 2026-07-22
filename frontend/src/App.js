@@ -1,6 +1,7 @@
 
 import React from 'react';
 import { BrowserRouter as Router, Routes, Route, Link } from 'react-router-dom';
+import QuoteForm from './pages/QuoteForm';
 import './App.css';
 
 function App() {
@@ -17,7 +18,7 @@ function App() {
         &lt;main&gt;
           &lt;Routes&gt;
             &lt;Route path="/" element={&lt;div&gt;&lt;h2&gt;欢迎使用机加工报价系统&lt;/h2&gt;&lt;/div&gt;} /&gt;
-            &lt;Route path="/quotes/new" element={&lt;div&gt;&lt;h2&gt;新建报价表单&lt;/h2&gt;&lt;/div&gt;} /&gt;
+            &lt;Route path="/quotes/new" element={&lt;QuoteForm /&gt;} /&gt;
           &lt;/Routes&gt;
         &lt;/main&gt;
       &lt;/div&gt;
