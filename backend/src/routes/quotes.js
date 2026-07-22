@@ -4,6 +4,14 @@ const router = express.Router();
 const Quote = require('../models/Quote');
 const QuoteCalculator = require('../services/QuoteCalculator');
 const AIReviewer = require('../services/AIReviewer');
+const QuoteGenerator = require('../services/QuoteGenerator');
+const path = require('path');
+const fs = require('fs');
+
+const uploadsDir = path.join(__dirname, '../uploads');
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+}
 
 router.post('/', async (req, res) => {
   try {
@@ -77,6 +85,42 @@ router.post('/:id/ai-review', async (req, res) => {
     });
 
     res.json(updatedQuote);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.post('/:id/manual-review', async (req, res) => {
+  try {
+    const { status, comments } = req.body;
+    const manualReview = {
+      status,
+      comments,
+      reviewedAt: new Date().toISOString()
+    };
+
+    const updatedQuote = await Quote.update(req.params.id, {
+      manualReview,
+      status: status === 'approved' ? 'finalized' : 'manually_reviewed'
+    });
+
+    res.json(updatedQuote);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.get('/:id/export', async (req, res) => {
+  try {
+    const quote = await Quote.findById(req.params.id);
+    if (!quote) {
+      return res.status(404).json({ error: 'Quote not found' });
+    }
+
+    const outputPath = path.join(uploadsDir, `quote-${quote.id}.pdf`);
+    await QuoteGenerator.generatePDF(quote, outputPath);
+
+    res.download(outputPath, `报价单-${quote.partName}.pdf`);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
