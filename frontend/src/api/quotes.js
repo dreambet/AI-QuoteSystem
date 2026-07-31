@@ -11,7 +11,10 @@ export const quoteApi = {
   calculate: (id) => axios.post(`${API_BASE}/${id}/calculate`),
   aiReview: (id) => axios.post(`${API_BASE}/${id}/ai-review`),
   manualReview: (id, data) => axios.post(`${API_BASE}/${id}/manual-review`, data),
-  export: (id) => window.open(`${API_BASE}/${id}/export`)
+  export: (id) => axios.get(`${API_BASE}/${id}/export`, { responseType: 'blob' }),
+  analyzeDrawing: (id, data) => axios.post(`${API_BASE}/${id}/analyze-drawing`, data),
+  aiQuote: (id, data) => axios.post(`${API_BASE}/${id}/ai-quote`, data),
+  get3DModel: (id) => axios.get(`${API_BASE}/${id}/3d-model`)
 };
 
 export const uploadApi = {
@@ -23,4 +26,3 @@ export const uploadApi = {
     });
   }
 };
-

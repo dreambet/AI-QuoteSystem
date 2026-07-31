@@ -1,0 +1,10 @@
+{
+  "watch": ["src"],
+  "ext": "js,json,env",
+  "ignore": ["src/uploads", "src/data"],
+  "delay": 500,
+  "signal": "SIGTERM",
+  "env": {
+    "NODE_ENV": "development"
+  }
+}

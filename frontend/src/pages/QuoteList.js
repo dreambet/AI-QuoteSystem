@@ -1,80 +1,34 @@
-
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { quoteApi } from '../api/quotes';
 
+const statusMap = { draft: '草稿', calculated: '已计算', ai_reviewed: 'AI 已审核', manually_reviewed: '人工已审核', finalized: '已完成' };
+
 function QuoteList() {
   const [quotes, setQuotes] = useState([]);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    loadQuotes();
+    quoteApi.getAll().then(response => setQuotes(response.data)).catch(() => setQuotes([])).finally(() => setLoading(false));
   }, []);
 
-  const loadQuotes = async () => {
-    const response = await quoteApi.getAll();
-    setQuotes(response.data);
-  };
-
-  const getStatusText = (status) => {
-    const map = {
-      'draft': '草稿',
-      'calculated': '已计算',
-      'ai_reviewed': 'AI已审核',
-      'manually_reviewed': '人工已审核',
-      'finalized': '已完成'
-    };
-    return map[status] || status;
-  };
-
-  return (
-    &lt;div style={{ padding: '20px', maxWidth: '1000px', margin: '0 auto' }}&gt;
-      &lt;div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}&gt;
-        &lt;h2&gt;报价列表&lt;/h2&gt;
-        &lt;Link
-          to="/quotes/new"
-          style={{
-            padding: '10px 20px',
-            backgroundColor: '#007bff',
-            color: 'white',
-            textDecoration: 'none',
-            borderRadius: '4px'
-          }}
-        &gt;
-          + 新建报价
-        &lt;/Link&gt;
-      &lt;/div&gt;
-
-      &lt;table style={{ width: '100%', borderCollapse: 'collapse' }}&gt;
-        &lt;thead&gt;
-          &lt;tr style={{ backgroundColor: '#f5f5f5' }}&gt;
-            &lt;th style={{ padding: '12px', textAlign: 'left', borderBottom: '1px solid #ddd' }}&gt;零件名称&lt;/th&gt;
-            &lt;th style={{ padding: '12px', textAlign: 'left', borderBottom: '1px solid #ddd' }}&gt;材料&lt;/th&gt;
-            &lt;th style={{ padding: '12px', textAlign: 'left', borderBottom: '1px solid #ddd' }}&gt;数量&lt;/th&gt;
-            &lt;th style={{ padding: '12px', textAlign: 'left', borderBottom: '1px solid #ddd' }}&gt;总价&lt;/th&gt;
-            &lt;th style={{ padding: '12px', textAlign: 'left', borderBottom: '1px solid #ddd' }}&gt;状态&lt;/th&gt;
-            &lt;th style={{ padding: '12px', textAlign: 'left', borderBottom: '1px solid #ddd' }}&gt;操作&lt;/th&gt;
-          &lt;/tr&gt;
-        &lt;/thead&gt;
-        &lt;tbody&gt;
-          {quotes.map(quote =&gt; (
-            &lt;tr key={quote.id}&gt;
-              &lt;td style={{ padding: '12px', borderBottom: '1px solid #ddd' }}&gt;{quote.partName}&lt;/td&gt;
-              &lt;td style={{ padding: '12px', borderBottom: '1px solid #ddd' }}&gt;{quote.material}&lt;/td&gt;
-              &lt;td style={{ padding: '12px', borderBottom: '1px solid #ddd' }}&gt;{quote.quantity}&lt;/td&gt;
-              &lt;td style={{ padding: '12px', borderBottom: '1px solid #ddd' }}&gt;
-                {quote.calculation ? `¥${quote.calculation.total.toFixed(2)}` : '-'}
-              &lt;/td&gt;
-              &lt;td style={{ padding: '12px', borderBottom: '1px solid #ddd' }}&gt;{getStatusText(quote.status)}&lt;/td&gt;
-              &lt;td style={{ padding: '12px', borderBottom: '1px solid #ddd' }}&gt;
-                &lt;Link to={`/quotes/${quote.id}`}&gt;查看&lt;/Link&gt;
-              &lt;/td&gt;
-            &lt;/tr&gt;
-          ))}
-        &lt;/tbody&gt;
-      &lt;/table&gt;
-    &lt;/div&gt;
-  );
+  const calculated = quotes.filter(quote => quote.calculation).length;
+  const reviewed = quotes.filter(quote => quote.status === 'ai_reviewed' || quote.status === 'finalized').length;
+  return <div className="quote-center-page">
+    <section className="quote-center-hero">
+      <div><span className="eyebrow">MACHINING QUOTATION / COMMAND CENTER</span><h1>报价中心</h1><p>统一管理零件任务、成本计算与 AI 审核结果。</p></div>
+      <div className="quote-center-actions"><Link className="secondary-action link-action" to="/quotes/new">新建基础报价</Link><Link className="primary-action link-action" to="/quotes/ai-new">进入 AI 分析工作台</Link></div>
+    </section>
+    <section className="quote-center-stats">
+      <div><span>全部任务</span><strong>{quotes.length}</strong><small>报价记录总数</small></div>
+      <div><span>已完成计算</span><strong>{calculated}</strong><small>已生成参考价格</small></div>
+      <div><span>已完成审核</span><strong>{reviewed}</strong><small>AI 或人工复核</small></div>
+    </section>
+    <section className="quote-table-card">
+      <div className="quote-table-heading"><div><span className="eyebrow">RECENT QUOTATIONS</span><h2>报价任务列表</h2></div><span>{loading ? '正在同步数据…' : `${quotes.length} 条记录`}</span></div>
+      {loading ? <div className="console-empty">正在加载报价任务…</div> : quotes.length ? <div className="quote-table-wrap"><table className="quote-table"><thead><tr><th>零件任务</th><th>材料 / 精度</th><th>数量</th><th>参考总价</th><th>状态</th><th aria-label="操作" /></tr></thead><tbody>{quotes.map(quote => <tr key={quote.id}><td><strong>{quote.partName || '未命名零件'}</strong><small>{quote.partNumber || `任务 #${quote.id}`}</small></td><td><strong>{quote.material || '—'}</strong><small>{quote.precision || '中等'} 精度</small></td><td>{quote.quantity || 1} 件</td><td className="quote-price">{quote.calculation ? `¥${Number(quote.calculation.total).toFixed(2)}` : '待计算'}</td><td><span className={`status-pill ${quote.status || 'draft'}`}>{statusMap[quote.status] || quote.status || '草稿'}</span></td><td><Link className="table-view-link" to={`/quotes/${quote.id}`}>查看 →</Link></td></tr>)}</tbody></table></div> : <div className="quote-empty"><div className="empty-mark">+</div><h3>尚未创建报价任务</h3><p>从 AI 工作台上传图纸，或创建一份基础报价开始。</p><Link className="primary-action link-action" to="/quotes/ai-new">创建首个分析任务</Link></div>}
+    </section>
+  </div>;
 }
 
 export default QuoteList;
-

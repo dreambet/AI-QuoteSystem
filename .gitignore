@@ -7,3 +7,10 @@ uploads
 .DS_Store
 *.log
 .env
+
+# Local/editor/generated work files
+output/
+tmp/
+.docx-work-system-design/
+.presentation_work/
+.superpowers/

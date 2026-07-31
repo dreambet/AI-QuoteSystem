@@ -8,19 +8,19 @@ class Quote {
       const now = new Date().toISOString();
       const {
         partName, partNumber, material, length, width, height, diameter,
-        quantity, deliveryDate, precision
+        quantity, deliveryDate, precision, drawingPath
       } = data;
 
       const stmt = db.prepare(`
         INSERT INTO quotes (
           id, partName, partNumber, material, length, width, height, diameter,
-          quantity, deliveryDate, precision, status, createdAt, updatedAt
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          quantity, deliveryDate, precision, drawingPath, status, createdAt, updatedAt
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
       stmt.run(
         id, partName, partNumber || '', material, length || 0, width || 0, height || 0, diameter || 0,
-        quantity, deliveryDate || '', precision || '', 'draft', now, now,
+        quantity, deliveryDate || '', precision || '', drawingPath || '', 'draft', now, now,
         function(err) {
           if (err) reject(err);
           else resolve({ id, ...data, status: 'draft', createdAt: now, updatedAt: now });
@@ -77,7 +77,9 @@ class Quote {
       ...row,
       calculation: row.calculation ? JSON.parse(row.calculation) : null,
       aiReview: row.aiReview ? JSON.parse(row.aiReview) : null,
-      manualReview: row.manualReview ? JSON.parse(row.manualReview) : null
+      manualReview: row.manualReview ? JSON.parse(row.manualReview) : null,
+      drawingAnalysis: row.drawingAnalysis ? JSON.parse(row.drawingAnalysis) : null,
+      aiQuoteAnalysis: row.aiQuoteAnalysis ? JSON.parse(row.aiQuoteAnalysis) : null
     };
   }
 }
