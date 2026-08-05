@@ -38,10 +38,10 @@ class CADParserService {
   _parseDXFContent(content) {
     const parser = new DxfParser();
     const dxf = parser.parseSync(content);
-    const entitySummary = this._summarizeEntities(dxf.entities || []);
-    const bounds = this._calculateBounds(dxf.entities || []);
-
-    const modelSpec = this._buildParametricModelSpec(entitySummary.features, bounds);
+    const entities = dxf.entities || [];
+    const entitySummary = this._summarizeEntities(entities);
+    const model = this._extractDxf3DModel(entities);
+    const bounds = model ? this._calculateDxf3DBounds(model) : this._calculateBounds(entities);
 
     return {
       success: true,
@@ -51,10 +51,11 @@ class CADParserService {
       entitySummary,
       bounds,
       features: entitySummary.features,
-      modelSpec,
-      modelInfo: modelSpec
-        ? { type: 'parametric', source: '2d_drawing', label: '二维图纸推断模型', available: true }
-        : { type: 'none', source: '2d_drawing', label: '未找到可拉伸的闭合轮廓', available: false }
+      ...(model ? { model } : {}),
+      // 以实体数据而非文件扩展名判断维度：仅有二维图元时保留其原始平面；检测到三维面或 Z 坐标路径时才进入三维渲染。
+      modelInfo: model
+        ? { type: 'mesh', source: 'dxf_3d', label: 'DXF/DWG 原始三维数据', available: true }
+        : { type: 'drawing2d', source: '2d_drawing', label: '二维原始平面图', available: true }
     };
   }
 
@@ -257,17 +258,97 @@ class CADParserService {
     }
   }
 
+  _extractDxf3DModel(entities) {
+    const positions = [];
+    const indices = [];
+    const linePaths = [];
+    const addFace = (vertices) => {
+      const points = vertices.filter(point => Number.isFinite(point?.x) && Number.isFinite(point?.y));
+      if (points.length < 3) return;
+      const start = positions.length / 3;
+      points.forEach(point => positions.push(point.x, point.y, point.z || 0));
+      for (let index = 1; index < points.length - 1; index += 1) indices.push(start, start + index, start + index + 1);
+    };
+    const addLinePath = (vertices) => {
+      const points = vertices.filter(point => Number.isFinite(point?.x) && Number.isFinite(point?.y));
+      if (points.length > 1) linePaths.push({ points: points.flatMap(point => [point.x, point.y, point.z || 0]) });
+    };
+    const hasZ = point => Math.abs(point?.z || 0) > 1e-8;
+
+    entities.forEach(entity => {
+      if (entity.type === '3DFACE' || entity.type === 'SOLID') {
+        addFace(entity.vertices || entity.points || []);
+        return;
+      }
+
+      const vertices = entity.vertices || [];
+      if (entity.type === 'POLYLINE' && entity.isPolyfaceMesh) {
+        const meshVertices = vertices.filter(vertex => !vertex.faceA && !vertex.faceB && !vertex.faceC && !vertex.faceD);
+        vertices.filter(vertex => vertex.faceA || vertex.faceB || vertex.faceC || vertex.faceD).forEach(face => {
+          const faceVertices = [face.faceA, face.faceB, face.faceC, face.faceD]
+            .filter(Boolean)
+            .map(index => meshVertices[Math.abs(index) - 1])
+            .filter(Boolean);
+          addFace(faceVertices);
+        });
+        return;
+      }
+
+      if ((entity.type === 'POLYLINE' && (entity.is3dPolyline || entity.is3dPolygonMesh || vertices.some(hasZ))) ||
+        (entity.type === 'LINE' && vertices.some(hasZ))) {
+        addLinePath(vertices);
+      }
+    });
+
+    if (!indices.length && !linePaths.length) return null;
+    const meshes = indices.length ? [{
+      name: 'DXF/DWG 3D Faces',
+      color: [0.55, 0.68, 0.78],
+      positions,
+      normals: [],
+      indices,
+      faces: []
+    }] : [];
+    return { meshes, linePaths };
+  }
+
+  _calculateDxf3DBounds(model) {
+    const positions = [
+      ...(model.meshes || []).flatMap(mesh => mesh.positions || []),
+      ...(model.linePaths || []).flatMap(path => path.points || [])
+    ];
+    if (!positions.length) return null;
+    const xs = [], ys = [], zs = [];
+    for (let index = 0; index < positions.length; index += 3) {
+      xs.push(positions[index]);
+      ys.push(positions[index + 1]);
+      zs.push(positions[index + 2]);
+    }
+    return {
+      minX: Math.min(...xs), maxX: Math.max(...xs),
+      minY: Math.min(...ys), maxY: Math.max(...ys),
+      minZ: Math.min(...zs), maxZ: Math.max(...zs),
+      width: Math.max(...xs) - Math.min(...xs),
+      height: Math.max(...ys) - Math.min(...ys),
+      depth: Math.max(...zs) - Math.min(...zs)
+    };
+  }
+
   _summarizeEntities(entities) {
     const summary = {
       totalEntities: entities.length,
       line: 0,
       circle: 0,
       arc: 0,
+      ellipse: 0,
+      spline: 0,
       lwpolyline: 0,
       polyline: 0,
       text: 0,
       mtext: 0,
       dimensions: 0,
+      '3dface': 0,
+      solid: 0,
       other: 0,
       features: []
     };
@@ -276,8 +357,9 @@ class CADParserService {
       const type = entity.type;
       if (!type) return;
 
-      if (summary[type] !== undefined) {
-        summary[type] += 1;
+      const summaryKey = type.toLowerCase();
+      if (summary[summaryKey] !== undefined) {
+        summary[summaryKey] += 1;
       } else {
         summary.other += 1;
       }
@@ -289,7 +371,11 @@ class CADParserService {
           summary.features.push({
             type: '直线',
             description: `起点 (${v[0].x.toFixed(2)}, ${v[0].y.toFixed(2)}), 终点 (${v[1].x.toFixed(2)}, ${v[1].y.toFixed(2)})`,
-            data: { x1: v[0].x, y1: v[0].y, x2: v[1].x, y2: v[1].y }
+            data: {
+              x1: v[0].x, y1: v[0].y, z1: v[0].z || 0,
+              x2: v[1].x, y2: v[1].y, z2: v[1].z || 0,
+              position: { x: (v[0].x + v[1].x) / 2, y: (v[0].y + v[1].y) / 2, z: ((v[0].z || 0) + (v[1].z || 0)) / 2 }
+            }
           });
         }
       }
@@ -316,6 +402,31 @@ class CADParserService {
         });
       }
 
+      if (type === 'ELLIPSE' && entity.center && entity.majorAxisEndPoint) {
+        summary.features.push({
+          type: '椭圆',
+          description: `中心 (${entity.center.x.toFixed(2)}, ${entity.center.y.toFixed(2)})`,
+          data: {
+            cx: entity.center.x, cy: entity.center.y,
+            majorX: entity.majorAxisEndPoint.x, majorY: entity.majorAxisEndPoint.y,
+            axisRatio: entity.axisRatio || 1,
+            startAngle: entity.startAngle || 0,
+            endAngle: entity.endAngle || Math.PI * 2
+          }
+        });
+      }
+
+      if (type === 'SPLINE') {
+        const vertices = entity.fitPoints?.length ? entity.fitPoints : (entity.controlPoints || []);
+        if (vertices.length > 1) {
+          summary.features.push({
+            type: '样条曲线',
+            description: `${vertices.length} 个控制点`,
+            data: { vertices: vertices.map(vertex => ({ x: vertex.x, y: vertex.y })) }
+          });
+        }
+      }
+
       if (type === 'LWPOLYLINE' || type === 'POLYLINE') {
         const vertices = entity.vertices || [];
         const closed = this._isClosedPolyline(entity, vertices);
@@ -325,17 +436,39 @@ class CADParserService {
           data: {
             vertexCount: vertices.length,
             closed,
-            vertices: vertices.map(v => ({ x: v.x, y: v.y }))
+            vertices: vertices.map(v => ({ x: v.x, y: v.y, z: v.z || 0 })),
+            position: vertices.length ? {
+              x: vertices.reduce((sum, vertex) => sum + vertex.x, 0) / vertices.length,
+              y: vertices.reduce((sum, vertex) => sum + vertex.y, 0) / vertices.length,
+              z: vertices.reduce((sum, vertex) => sum + (vertex.z || 0), 0) / vertices.length
+            } : null
           }
+        });
+      }
+
+      if (type === '3DFACE' || type === 'SOLID') {
+        const vertices = entity.vertices || entity.points || [];
+        const count = vertices.length || 0;
+        const position = count ? {
+          x: vertices.reduce((sum, vertex) => sum + (vertex.x || 0), 0) / count,
+          y: vertices.reduce((sum, vertex) => sum + (vertex.y || 0), 0) / count,
+          z: vertices.reduce((sum, vertex) => sum + (vertex.z || 0), 0) / count
+        } : null;
+        summary.features.push({
+          type: '三维面',
+          description: `${type}，${count} 个顶点`,
+          data: { position }
         });
       }
 
       // TEXT: dxf-parser uses startPoint; MTEXT: uses position
       if (type === 'TEXT' || type === 'MTEXT') {
         const text = entity.text || entity.value || '';
+        const position = entity.startPoint || entity.position;
         summary.features.push({
           type: '文本',
-          description: text.trim() || '无文本内容'
+          description: text.trim() || '无文本内容',
+          data: position ? { text, x: position.x, y: position.y } : { text }
         });
       }
     });
@@ -349,47 +482,6 @@ class CADParserService {
     const first = vertices[0];
     const last = vertices[vertices.length - 1];
     return first.x === last.x && first.y === last.y;
-  }
-
-  _buildParametricModelSpec(features, bounds) {
-    const candidates = features
-      .filter(feature => feature.type === '多段线' && feature.data?.closed && feature.data.vertices.length >= 3)
-      .map(feature => ({ vertices: feature.data.vertices, area: Math.abs(this._polygonArea(feature.data.vertices)) }))
-      .filter(candidate => candidate.area > 0)
-      .sort((a, b) => b.area - a.area);
-
-    if (!candidates.length) return null;
-
-    const outline = candidates[0].vertices;
-    const holes = features
-      .filter(feature => feature.type === '圆' && feature.data?.r > 0)
-      .filter(feature => this._isPointInPolygon(feature.data.cx, feature.data.cy, outline))
-      .map(feature => ({ type: 'circle', cx: feature.data.cx, cy: feature.data.cy, r: feature.data.r }));
-
-    return {
-      outline,
-      holes,
-      bounds,
-      instruction: '由二维闭合轮廓和内部圆孔拉伸生成；请确认厚度与孔位。'
-    };
-  }
-
-  _polygonArea(vertices) {
-    return vertices.reduce((area, vertex, index) => {
-      const next = vertices[(index + 1) % vertices.length];
-      return area + vertex.x * next.y - next.x * vertex.y;
-    }, 0) / 2;
-  }
-
-  _isPointInPolygon(x, y, vertices) {
-    let inside = false;
-    for (let i = 0, j = vertices.length - 1; i < vertices.length; j = i++) {
-      const xi = vertices[i].x, yi = vertices[i].y;
-      const xj = vertices[j].x, yj = vertices[j].y;
-      const intersects = ((yi > y) !== (yj > y)) && (x < ((xj - xi) * (y - yi)) / (yj - yi) + xi);
-      if (intersects) inside = !inside;
-    }
-    return inside;
   }
 
   _calculateBounds(entities) {
@@ -407,9 +499,19 @@ class CADParserService {
           // dxf-parser: LINE has vertices array
           (entity.vertices || []).forEach(v => addPoint(v));
           break;
-        case 'CIRCLE':
+        case 'CIRCLE': {
+          const radius = entity.radius || 0;
+          addPoint({ x: entity.center?.x - radius, y: entity.center?.y - radius });
+          addPoint({ x: entity.center?.x + radius, y: entity.center?.y + radius });
+          break;
+        }
         case 'ARC':
           addPoint(entity.center);
+          break;
+        case 'ELLIPSE':
+          addPoint(entity.center);
+          addPoint({ x: entity.center?.x + entity.majorAxisEndPoint?.x, y: entity.center?.y + entity.majorAxisEndPoint?.y });
+          addPoint({ x: entity.center?.x - entity.majorAxisEndPoint?.x, y: entity.center?.y - entity.majorAxisEndPoint?.y });
           break;
         case 'LWPOLYLINE':
         case 'POLYLINE':

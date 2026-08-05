@@ -7,6 +7,7 @@ const AIReviewer = require('../services/AIReviewer');
 const QuoteGenerator = require('../services/QuoteGenerator');
 const DeepSeekService = require('../services/DeepSeekService');
 const CADParserService = require('../services/CADParserService');
+const db = require('../db');
 const path = require('path');
 const fs = require('fs');
 
@@ -29,6 +30,75 @@ const drawingStorage = multer.diskStorage({
 });
 const uploadDrawing = multer({ storage: drawingStorage });
 
+// ---------- 计算辅助 ----------
+const num = (value, fallback = 0) => {
+  const n = typeof value === 'string' ? parseFloat(value) : Number(value);
+  return Number.isFinite(n) ? n : fallback;
+};
+const STALE_DAYS = 30;
+const isStale = confirmedAt => !confirmedAt || (Date.now() - new Date(confirmedAt).getTime()) > STALE_DAYS * 86400000;
+
+// 按材料编码/名称查当前 active 单价
+async function lookupMaterialPrice(material) {
+  if (!material) return null;
+  const rows = await db.query(
+    `SELECT mp.unitPrice, mp.confirmedAt, mp.effectiveAt, m.id AS materialId, m.code, m.density
+     FROM materials m LEFT JOIN material_prices mp ON mp.materialId = m.id AND mp.status = 'active'
+     WHERE m.code = ? OR m.name = ? LIMIT 1`,
+    [material, material]
+  );
+  return rows[0] || null;
+}
+
+// 解析报价策略：优先 strategyVersionId，其次取一条 published，再合并用户覆盖
+async function resolveStrategy(strategyVersionId, overrides = {}) {
+  let row;
+  if (overrides.strategyId) {
+    const rows = await db.query('SELECT * FROM pricing_strategies WHERE id = ? LIMIT 1', [overrides.strategyId]);
+    row = rows[0];
+  } else if (strategyVersionId) {
+    const rows = await db.query('SELECT * FROM pricing_strategies WHERE id = ? LIMIT 1', [strategyVersionId]);
+    row = rows[0];
+  }
+  if (!row) {
+    const rows = await db.query("SELECT * FROM pricing_strategies WHERE status = 'published' ORDER BY id LIMIT 1");
+    row = rows[0];
+  }
+  if (!row) {
+    row = { overheadRate: 0.1, profitRate: 0.3, taxRate: 0.13, sampleMultiplier: 1, materialLossRate: 0.05, toolLossRate: 0.08, setupFeeDefault: 0 };
+  }
+  return {
+    id: row.id,
+    code: row.code,
+    overheadRate: overrides.overheadRate != null ? num(overrides.overheadRate) : num(row.overheadRate),
+    profitRate: overrides.profitRate != null ? num(overrides.profitRate) : num(row.profitRate),
+    taxRate: overrides.taxRate != null ? num(overrides.taxRate) : (row.taxRate == null ? 0.13 : num(row.taxRate)),
+    sampleMultiplier: overrides.sampleMultiplier != null ? num(overrides.sampleMultiplier) : (row.sampleMultiplier == null ? 1 : num(row.sampleMultiplier)),
+    materialLossRate: overrides.materialLossRate != null ? num(overrides.materialLossRate) : num(row.materialLossRate),
+    toolLossRate: overrides.toolLossRate != null ? num(overrides.toolLossRate) : num(row.toolLossRate),
+    setupFeeDefault: num(row.setupFeeDefault, 0)
+  };
+}
+
+// 用 processes 表补全 selection 的 name/costType/默认费率
+async function enrichSelection(selection) {
+  const procs = await db.query('SELECT code, name, costType, hourlyRate, unitRate, fixedAmount FROM processes WHERE active = 1');
+  const map = new Map(procs.map(p => [p.code, p]));
+  return (selection || []).map(sel => {
+    const meta = map.get(sel.processCode) || {};
+    return {
+      processCode: sel.processCode,
+      name: sel.name || meta.name,
+      costType: sel.costType || meta.costType,
+      hourlyRate: sel.hourlyRate != null ? num(sel.hourlyRate) : num(meta.hourlyRate),
+      minutes: num(sel.minutes),
+      unitRate: sel.unitRate != null ? num(sel.unitRate) : num(meta.unitRate),
+      rate: sel.rate != null ? num(sel.rate) : null,
+      amount: sel.amount != null ? num(sel.amount) : num(meta.fixedAmount)
+    };
+  });
+}
+
 router.post('/', async (req, res) => {
   try {
     const quote = await Quote.create(req.body);
@@ -41,7 +111,11 @@ router.post('/', async (req, res) => {
 
 router.get('/', async (req, res) => {
   try {
-    const quotes = await Quote.findAll();
+    const { materialCode, partName, partDescription, q, status } = req.query;
+    const hasFilter = materialCode || partName || partDescription || q || status;
+    const quotes = hasFilter
+      ? await Quote.search({ materialCode, partName, partDescription, q, status })
+      : await Quote.findAll();
     res.json(quotes);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -76,14 +150,70 @@ router.post('/:id/calculate', async (req, res) => {
       return res.status(404).json({ error: 'Quote not found' });
     }
 
-    const calculation = QuoteCalculator.calculate(quote);
+    const { processSelection = [], unitPrice, strategyOverrides = {}, setupFee, strategyId } = req.body || {};
+
+    // 规格：优先专用列，回退 blankSpec/finishedSpec JSON
+    const blankSpec = quote.blankSpec || {};
+    const finishedSpec = quote.finishedSpec || {};
+    const grossWeight = num(quote.grossWeight ?? blankSpec.grossWeight ?? blankSpec['毛重']);
+    const netWeight = num(quote.netWeight ?? finishedSpec.netWeight ?? finishedSpec['净重']);
+
+    // 单价：请求体(用户第3步确认)优先 -> 材料当前 active 价格
+    let price;
+    let priceSource;
+    let priceConfirmedAt = null;
+    if (unitPrice != null && unitPrice !== '') {
+      price = num(unitPrice);
+      priceSource = 'manual';
+      priceConfirmedAt = new Date();
+    } else {
+      const mat = await lookupMaterialPrice(quote.material);
+      if (mat && mat.unitPrice != null) {
+        price = num(mat.unitPrice);
+        priceSource = 'catalog';
+        priceConfirmedAt = mat.confirmedAt;
+      } else {
+        price = 0;
+        priceSource = 'missing';
+      }
+    }
+
+    const strategy = await resolveStrategy(quote.strategyVersionId, { ...strategyOverrides, strategyId: strategyOverrides.strategyId || strategyId });
+    const selection = await enrichSelection(processSelection);
+    const fee = setupFee != null ? num(setupFee) : num(strategy.setupFeeDefault, 0);
+
+    const calculation = QuoteCalculator.calculate(
+      { grossWeight, netWeight, quantity: quote.quantity },
+      { processSelection: selection, strategy, unitPrice: price, setupFee: fee }
+    );
+
+    const priceSnapshot = {
+      unitPrice: price,
+      material: quote.material,
+      confirmedAt: priceConfirmedAt,
+      source: priceSource,
+      stale: priceSource === 'catalog' ? isStale(priceConfirmedAt) : false
+    };
+    const processSnapshot = {
+      processSelection: selection,
+      strategy: { id: strategy.id, code: strategy.code, overheadRate: strategy.overheadRate, profitRate: strategy.profitRate, taxRate: strategy.taxRate, sampleMultiplier: strategy.sampleMultiplier, materialLossRate: strategy.materialLossRate, toolLossRate: strategy.toolLossRate, setupFee: fee },
+      computed: { processes: calculation.processes, additions: calculation.additions }
+    };
+
     const updatedQuote = await Quote.update(req.params.id, {
       calculation,
+      priceSnapshot,
+      processSnapshot,
+      strategyVersionId: strategy.id || null,
+      grossWeight,
+      netWeight,
+      finalUnitPrice: calculation.unitPrice,
       status: 'calculated'
     });
 
     res.json(updatedQuote);
   } catch (error) {
+    console.error('计算报价失败:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -343,24 +473,31 @@ router.post('/:id/ai-quote', async (req, res) => {
     } catch (aiError) {
       console.error('AI报价分析失败，使用备用:', aiError.message);
       aiAnalysis = {
-        materialRecommendation: quote.material || '钢材',
-        processSuggestions: [
-          { name: '下料', reason: '准备毛坯' },
-          { name: '粗加工', reason: '去除余量' },
-          { name: '精加工', reason: '保证精度' }
-        ],
-        priceAnalysis: { totalEstimation: '基于系统计算引擎' },
-        warningPoints: ['建议人工审核确认'],
-        suggestions: ['使用系统内置计算引擎']
+        materialRecommendation: quote.material || '待确认材料',
+        processSuggestions: (quote.processSnapshot && Array.isArray(quote.processSnapshot.processSelection)
+          ? quote.processSnapshot.processSelection
+              .filter(s => s.costType === 'time' && s.minutes > 0)
+              .slice(0, 3)
+              .map(s => ({ name: s.name, reason: '已选机加工工序' }))
+          : []),
+        priceAnalysis: { totalEstimation: '基于系统计算引擎（K/R/S/T/U/V/W）' },
+        warningPoints: ['AI 暂不可用，建议人工审核', '请确认材料单价为最新市场价'],
+        suggestions: ['使用系统内置计算引擎', '在工序确认面板核对加工时长']
       };
     }
 
-    const calculation = QuoteCalculator.calculate(quote);
-    const updatedQuote = await Quote.update(req.params.id, {
-      calculation,
-      aiQuoteAnalysis: aiAnalysis,
-      status: 'ai_quoted'
-    });
+    // 复用第3步已计算的结果；若缺失则从 processSnapshot 重算
+    let calculation = quote.calculation;
+    if (!calculation && quote.processSnapshot) {
+      const ps = quote.processSnapshot;
+      calculation = QuoteCalculator.calculate(
+        { grossWeight: quote.grossWeight, netWeight: quote.netWeight, quantity: quote.quantity },
+        { processSelection: ps.processSelection, strategy: ps.strategy, unitPrice: quote.priceSnapshot && quote.priceSnapshot.unitPrice, setupFee: ps.strategy && ps.strategy.setupFee }
+      );
+    }
+    const updateData = { aiQuoteAnalysis: aiAnalysis, status: 'ai_quoted' };
+    if (calculation) updateData.calculation = calculation;
+    const updatedQuote = await Quote.update(req.params.id, updateData);
 
     res.json({
       success: true,

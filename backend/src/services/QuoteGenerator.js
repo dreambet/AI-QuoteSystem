@@ -109,52 +109,83 @@ class QuoteGenerator {
 
         this.addSectionTitle(doc, '基本信息');
         this.addKeyValue(doc, '零件名称：', quote.partName);
+        this.addKeyValue(doc, '物料编码：', quote.materialCode);
         this.addKeyValue(doc, '零件编号：', quote.partNumber);
         this.addKeyValue(doc, '材料：', quote.material);
         this.addKeyValue(doc, '数量：', quote.quantity);
         this.addKeyValue(doc, '精度等级：', quote.precision);
+        this.addKeyValue(doc, '毛重(kg)：', quote.grossWeight);
+        this.addKeyValue(doc, '净重(kg)：', quote.netWeight);
+
+        // 材料规格 / 产品规格
+        const blankSpec = quote.blankSpec || {};
+        const finishedSpec = quote.finishedSpec || {};
+        const blankEntries = Object.entries(blankSpec || {});
+        const finishedEntries = Object.entries(finishedSpec || {});
+        if (blankEntries.length || finishedEntries.length) {
+          this.addSectionTitle(doc, '规格参数');
+          if (blankEntries.length) {
+            doc.fillColor('#117A8B').fontSize(11).text('材料规格');
+            doc.fillColor('#213544').fontSize(10.5);
+            this.addKeyValue(doc, '材料规格：', blankEntries.map(([k, v]) => `${k}=${v}`).join('，'));
+          }
+          if (finishedEntries.length) {
+            doc.moveDown(0.3).fillColor('#117A8B').fontSize(11).text('产品规格');
+            doc.fillColor('#213544').fontSize(10.5);
+            this.addKeyValue(doc, '产品规格：', finishedEntries.map(([k, v]) => `${k}=${v}`).join('，'));
+          }
+        }
 
         const calculation = quote.calculation;
         if (calculation) {
-          const breakdown = calculation.breakdown || {};
-          const volumeCalculation = breakdown.volumeCalculation || {};
-          const materialCalculation = breakdown.materialCalculation || {};
-          const processBreakdown = breakdown.processBreakdown || {};
+          const priceSnap = quote.priceSnapshot || {};
 
           this.addSectionTitle(doc, '报价计算明细');
-          doc.fillColor('#117A8B').fontSize(11).text('01  体积与重量');
+          doc.fillColor('#117A8B').fontSize(11).text('01  材料成本');
           doc.fillColor('#213544').fontSize(10.5);
-          this.addKeyValue(doc, '零件形状：', volumeCalculation.type);
-          this.addKeyValue(doc, '尺寸参数：', volumeCalculation.dimensions);
-          this.addKeyValue(doc, '计算公式：', volumeCalculation.formula);
-          this.addKeyValue(doc, '体积：', `${Number(breakdown.volume || 0).toFixed(4)} cm³`);
-          this.addKeyValue(doc, '重量：', `${Number(breakdown.weight || 0).toFixed(3)} kg`);
+          this.addKeyValue(doc, '毛重 × 单价：', `${Number(quote.grossWeight || calculation.inputs?.grossWeight || 0)} × ${this.value(priceSnap.unitPrice)} = ${this.amount(calculation.materialCost)}`);
 
-          doc.moveDown(0.45).fillColor('#117A8B').fontSize(11).text('02  材料成本');
+          doc.moveDown(0.45).fillColor('#117A8B').fontSize(11).text('02  机加工工序');
           doc.fillColor('#213544').fontSize(10.5);
-          this.addKeyValue(doc, '材料单价：', `${this.value(breakdown.materialPricePerKg)} 元/kg`);
-          this.addKeyValue(doc, '计算依据：', materialCalculation.formula);
-          this.addKeyValue(doc, '材料成本：', this.amount(calculation.materialCost));
-
-          doc.moveDown(0.45).fillColor('#117A8B').fontSize(11).text('03  加工工序');
-          doc.fillColor('#213544').fontSize(10.5);
-          const processes = Array.isArray(processBreakdown.processes) ? processBreakdown.processes : [];
+          const processes = Array.isArray(calculation.processes) ? calculation.processes : [];
           if (processes.length) {
-            processes.forEach((process, index) => {
-              doc.text(`${index + 1}. ${this.value(process.name)}  ·  ${this.value(process.estimatedTime)} 小时  ·  人工 ${this.amount(process.laborCost)}  ·  设备 ${this.amount(process.equipmentCost)}`);
+            processes.forEach((p, i) => {
+              doc.text(`${i + 1}. ${this.value(p.name)}  ·  工费率 ${this.value(p.hourlyRate)}元/h  ·  ${this.value(p.minutes)} 分钟  ·  成本 ${this.amount(p.cost)}`);
             });
-            this.addKeyValue(doc, '预计总工时：', `${this.value(processBreakdown.summary?.totalTime)} 小时`);
+            this.addKeyValue(doc, '机加工成本 R：', this.amount(calculation.machiningCost));
           } else {
-            doc.fillColor('#77909B').text('暂无可用工序明细。');
+            doc.fillColor('#77909B').text('无机加工工序。');
           }
+
+          doc.moveDown(0.45).fillColor('#117A8B').fontSize(11).text('03  附加费用');
+          doc.fillColor('#213544').fontSize(10.5);
+          const additions = Array.isArray(calculation.additions) ? calculation.additions : [];
+          if (additions.length) {
+            additions.forEach((a, i) => {
+              doc.text(`${i + 1}. ${this.value(a.name)}  ·  ${this.value(a.formula)}  ·  成本 ${this.amount(a.cost)}`);
+            });
+          } else {
+            doc.fillColor('#77909B').text('无附加费用。');
+          }
+
+          doc.moveDown(0.45).fillColor('#117A8B').fontSize(11).text('04  费用链');
+          doc.fillColor('#213544').fontSize(10.5);
+          const trace = calculation.formulaTrace || {};
+          ['K', 'R', 'S', 'T', 'U', 'V', 'W'].forEach(key => {
+            const t = trace[key];
+            if (t) this.addKeyValue(doc, `${t.label}：`, t.expression);
+          });
 
           this.addSectionTitle(doc, '费用汇总');
           const costRows = [
-            ['材料成本', calculation.materialCost],
-            ['人工成本', calculation.laborCost],
-            ['设备费用', calculation.equipmentCost],
-            ['管理费用', calculation.overheadCost],
-            ['利润', calculation.profit]
+            ['材料成本 K', calculation.materialCost],
+            ['机加工成本 R', calculation.machiningCost],
+            ['管销 S', calculation.overhead],
+            ['小计 T', calculation.subtotal],
+            ['利润 U', calculation.profit],
+            ['含税成本 V', calculation.taxIncluded],
+            ['样品价格 W', calculation.samplePrice],
+            ['打样调机费', calculation.setupFee]
           ];
           costRows.forEach(([label, cost]) => this.addKeyValue(doc, `${label}：`, this.amount(cost)));
           doc.moveDown(0.35);
@@ -166,6 +197,10 @@ class QuoteGenerator {
           doc.fillColor('#0A3846').fontSize(17)
             .text(this.amount(calculation.total), doc.page.margins.left, totalBoxY + 8, { width: totalBoxWidth - 13, align: 'right', lineBreak: false });
           doc.y = totalBoxY + 52;
+
+          if (priceSnap.unitPrice != null) {
+            this.addKeyValue(doc, '单价快照：', `${this.value(priceSnap.unitPrice)} 元/kg（来源 ${this.value(priceSnap.source)}，${priceSnap.confirmedAt ? new Date(priceSnap.confirmedAt).toLocaleString('zh-CN') : '未确认'}）`);
+          }
         }
 
         if (quote.aiReview) {

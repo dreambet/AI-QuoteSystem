@@ -1,9 +1,9 @@
 import React, { useState, useRef, useMemo, useEffect } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { Canvas, useFrame } from '@react-three/fiber';
-import { OrbitControls, Grid, Line } from '@react-three/drei';
+import { OrbitControls, Grid, Line, Text } from '@react-three/drei';
 import * as THREE from 'three';
-import { quoteApi, uploadApi } from '../api/quotes';
+import { quoteApi, uploadApi, catalogApi } from '../api/quotes';
 
 // ========================
 // 折叠面板组件
@@ -218,69 +218,72 @@ function get2DFeatureCenter(feature) {
   return null;
 }
 
-function ParametricPartModel({ modelSpec, formData, features, selectedFeatureIndex, showContours, onSelectFeature }) {
-  const scale = 1 / 50;
-  const depth = Math.max(parseFloat(formData.height) || 20, 1) * scale;
-  const geometry = useMemo(() => {
-    if (!modelSpec?.outline?.length) return null;
-    const { minX = 0, maxX = 0, minY = 0, maxY = 0 } = modelSpec.bounds || {};
-    const centerX = (minX + maxX) / 2;
-    const centerY = (minY + maxY) / 2;
-    const point = ({ x, y }) => new THREE.Vector2((x - centerX) * scale, (y - centerY) * scale);
-    const outline = modelSpec.outline.map(point);
-    const shape = new THREE.Shape();
-    shape.moveTo(outline[0].x, outline[0].y);
-    outline.slice(1).forEach(vertex => shape.lineTo(vertex.x, vertex.y));
-    shape.closePath();
-    (modelSpec.holes || []).forEach(hole => {
-      const path = new THREE.Path();
-      path.absellipse((hole.cx - centerX) * scale, (hole.cy - centerY) * scale, hole.r * scale, hole.r * scale, 0, Math.PI * 2, true);
-      shape.holes.push(path);
-    });
-    return new THREE.ExtrudeGeometry(shape, { depth, bevelEnabled: true, bevelSegments: 2, bevelSize: Math.min(depth * 0.04, 0.03), bevelThickness: Math.min(depth * 0.04, 0.03), curveSegments: 32 });
-  }, [modelSpec, depth]);
-
-  const selectedFeature = features[selectedFeatureIndex];
-  const highlight = selectedFeature?.type === '圆' ? selectedFeature.data : null;
-  const bounds = modelSpec?.bounds || {};
-  const highlightPosition = highlight ? [
-    (highlight.cx - ((bounds.minX + bounds.maxX) / 2)) * scale,
-    (highlight.cy - ((bounds.minY + bounds.maxY) / 2)) * scale,
-    depth + 0.01
-  ] : null;
-  const contourPoints = modelSpec?.outline?.map(vertex => [
-    (vertex.x - ((bounds.minX + bounds.maxX) / 2)) * scale,
-    (vertex.y - ((bounds.minY + bounds.maxY) / 2)) * scale,
-    depth + 0.01
-  ]) || [];
-  const markerPoints = features.map((feature, index) => {
-    const point = get2DFeatureCenter(feature);
-    return point && {
-      index,
-      priority: ['圆', '圆弧'].includes(feature.type) || (feature.type === '多段线' && feature.data?.closed) ? 'primary' : 'secondary',
-      position: [
-        (point.x - ((bounds.minX + bounds.maxX) / 2)) * scale,
-        (point.y - ((bounds.minY + bounds.maxY) / 2)) * scale,
-        depth + 0.08
-      ]
+function Drawing2DModel({ features, bounds, selectedFeatureIndex, onSelectFeature }) {
+  const { scale, centerX, centerY } = useMemo(() => {
+    const width = Math.max(bounds?.width || 0, 1);
+    const height = Math.max(bounds?.height || 0, 1);
+    return {
+      scale: 8 / Math.max(width, height),
+      centerX: ((bounds?.minX || 0) + (bounds?.maxX || 0)) / 2,
+      centerY: ((bounds?.minY || 0) + (bounds?.maxY || 0)) / 2
     };
-  }).filter(Boolean);
-  const displayedMarkers = selectFeatureMarkers(markerPoints, selectedFeatureIndex);
+  }, [bounds]);
+  const point = (x, y, z = 0) => [(x - centerX) * scale, (y - centerY) * scale, z];
+  const arcPoints = (data) => {
+    const start = Math.abs(data.startAngle || 0) > Math.PI * 2 ? THREE.MathUtils.degToRad(data.startAngle || 0) : (data.startAngle || 0);
+    let end = Math.abs(data.endAngle || 0) > Math.PI * 2 ? THREE.MathUtils.degToRad(data.endAngle || 0) : (data.endAngle || 0);
+    if (end <= start) end += Math.PI * 2;
+    return Array.from({ length: 49 }, (_, index) => {
+      const angle = start + (end - start) * index / 48;
+      return point(data.cx + Math.cos(angle) * data.r, data.cy + Math.sin(angle) * data.r);
+    });
+  };
 
-  if (!geometry) return null;
-  return (
-    <group rotation={[-Math.PI / 2, 0, 0]}>
-      <mesh geometry={geometry}>
-        <meshStandardMaterial color="#8daebf" metalness={0.78} roughness={0.25} />
-      </mesh>
-      {showContours && contourPoints.length > 2 && <Line points={[...contourPoints, contourPoints[0]]} color="#42dcf4" lineWidth={1.5} />}
-      <FeaturePointMarkers markers={displayedMarkers} selectedFeatureIndex={selectedFeatureIndex} onSelectFeature={onSelectFeature} size={0.042} />
-      {highlightPosition && <mesh position={highlightPosition}>
-        <torusGeometry args={[highlight.r * scale, 0.018, 10, 36]} />
-        <meshStandardMaterial color="#ffb020" emissive="#ff7a00" emissiveIntensity={1.2} />
-      </mesh>}
-    </group>
-  );
+  return <group>
+    {features.map((feature, index) => {
+      const data = feature.data || {};
+      const selected = index === selectedFeatureIndex;
+      const color = selected ? '#ffb020' : '#d9f3ff';
+      const lineWidth = selected ? 2.4 : 1.25;
+      if (feature.type === '直线' && data.x1 != null && data.y1 != null) {
+        return <Line key={index} points={[point(data.x1, data.y1), point(data.x2, data.y2)]} color={color} lineWidth={lineWidth} onClick={() => onSelectFeature(index)} />;
+      }
+      if (feature.type === '圆' && data.cx != null && data.cy != null && data.r > 0) {
+        const points = Array.from({ length: 65 }, (_, segment) => {
+          const angle = segment / 64 * Math.PI * 2;
+          return point(data.cx + Math.cos(angle) * data.r, data.cy + Math.sin(angle) * data.r);
+        });
+        return <Line key={index} points={points} color={color} lineWidth={lineWidth} onClick={() => onSelectFeature(index)} />;
+      }
+      if (feature.type === '圆弧' && data.cx != null && data.cy != null && data.r > 0) {
+        return <Line key={index} points={arcPoints(data)} color={color} lineWidth={lineWidth} onClick={() => onSelectFeature(index)} />;
+      }
+      if (feature.type === '椭圆' && data.cx != null && data.cy != null && Math.hypot(data.majorX, data.majorY) > 0) {
+        const majorLength = Math.hypot(data.majorX, data.majorY);
+        const start = data.startAngle || 0;
+        let end = data.endAngle || Math.PI * 2;
+        if (end <= start) end += Math.PI * 2;
+        const points = Array.from({ length: 65 }, (_, segment) => {
+          const angle = start + (end - start) * segment / 64;
+          const major = Math.cos(angle) * majorLength;
+          const minor = Math.sin(angle) * majorLength * data.axisRatio;
+          const directionX = data.majorX / majorLength;
+          const directionY = data.majorY / majorLength;
+          return point(data.cx + directionX * major - directionY * minor, data.cy + directionY * major + directionX * minor);
+        });
+        return <Line key={index} points={points} color={color} lineWidth={lineWidth} onClick={() => onSelectFeature(index)} />;
+      }
+      if ((feature.type === '多段线' || feature.type === '样条曲线') && data.vertices?.length > 1) {
+        const points = data.vertices.map(vertex => point(vertex.x, vertex.y));
+        if (data.closed) points.push(points[0]);
+        return <Line key={index} points={points} color={color} lineWidth={lineWidth} onClick={() => onSelectFeature(index)} />;
+      }
+      if (feature.type === '文本' && data.text && data.x != null && data.y != null) {
+        return <Text key={index} position={point(data.x, data.y, 0.02)} color={color} fontSize={Math.max(0.1, Math.min(0.28, scale * 3))} anchorX="left" anchorY="middle">{data.text}</Text>;
+      }
+      return null;
+    })}
+  </group>;
 }
 
 function StepMesh({ mesh, showEdges, selected }) {
@@ -303,7 +306,10 @@ function StepMesh({ mesh, showEdges, selected }) {
 
 function StepMeshModel({ model, showEdges, selectedFeature, features, selectedFeatureIndex, onSelectFeature }) {
   const { center, scale } = useMemo(() => {
-    const values = model.meshes.flatMap(mesh => mesh.positions);
+    const values = [
+      ...(model.meshes || []).flatMap(mesh => mesh.positions || []),
+      ...(model.linePaths || []).flatMap(path => path.points || [])
+    ];
     if (!values.length) return { center: [0, 0, 0], scale: 0.02 };
     const xs = [], ys = [], zs = [];
     for (let i = 0; i < values.length; i += 3) { xs.push(values[i]); ys.push(values[i + 1]); zs.push(values[i + 2]); }
@@ -335,7 +341,8 @@ function StepMeshModel({ model, showEdges, selectedFeature, features, selectedFe
   });
   return <>
     <group scale={[scale, scale, scale]} position={[-center[0] * scale, -center[1] * scale, -center[2] * scale]}>
-      {model.meshes.map((mesh, index) => <StepMesh key={`${mesh.name}-${index}`} mesh={mesh} showEdges={showEdges} selected={selectedMeshIndex === index} />)}
+      {(model.meshes || []).map((mesh, index) => <StepMesh key={`${mesh.name}-${index}`} mesh={mesh} showEdges={showEdges} selected={selectedMeshIndex === index} />)}
+      {(model.linePaths || []).map((path, index) => <Line key={`path-${index}`} points={Array.from({ length: path.points.length / 3 }, (_, pointIndex) => path.points.slice(pointIndex * 3, pointIndex * 3 + 3))} color="#d9f3ff" lineWidth={1.2} />)}
     </group>
     <FeaturePointMarkers markers={worldMarkers} selectedFeatureIndex={selectedFeatureIndex} onSelectFeature={onSelectFeature} size={0.042} />
   </>;
@@ -350,7 +357,6 @@ function Part3DPreview({ quoteId, formData, analysisResult, selectedFeatureIndex
   const cadBounds = analysisResult?.cadInfo?.bounds || null;
   const cadEntityCount = analysisResult?.cadInfo?.entityCount || 0;
   const modelInfo = analysisResult?.modelInfo || analysisResult?.cadInfo?.modelInfo || {};
-  const modelSpec = analysisResult?.cadInfo?.modelSpec || null;
   const [stepModel, setStepModel] = useState(null);
   const [modelError, setModelError] = useState('');
   const [loadingModel, setLoadingModel] = useState(false);
@@ -369,9 +375,9 @@ function Part3DPreview({ quoteId, formData, analysisResult, selectedFeatureIndex
     return () => { active = false; };
   }, [quoteId, modelInfo.type]);
 
-  const hasParametricModel = modelInfo.type === 'parametric' && modelSpec?.outline?.length;
-  const hasStepModel = modelInfo.type === 'mesh' && stepModel?.meshes?.length;
-  const modelLabel = modelInfo.label || (hasParametricModel ? '二维图纸推断模型' : '未生成模型');
+  const has2DDrawing = modelInfo.type === 'drawing2d' && features.length > 0;
+  const hasStepModel = modelInfo.type === 'mesh' && (stepModel?.meshes?.length || stepModel?.linePaths?.length);
+  const modelLabel = modelInfo.label || (has2DDrawing ? '二维原始平面图' : '未生成模型');
 
   useEffect(() => {
     const viewport = viewportRef.current;
@@ -386,7 +392,7 @@ function Part3DPreview({ quoteId, formData, analysisResult, selectedFeatureIndex
     <div className="model-viewport" ref={viewportRef}>
       {/* 顶部标签 */}
       <div className="viewport-title">
-        {formData.partName || '零件 3D 预览'}
+        {formData.partName || (has2DDrawing ? '二维平面图' : '零件 3D 预览')}
         {cadBounds && (
           <span className="viewport-subtitle">
             {cadBounds.width?.toFixed(0)} × {cadBounds.height?.toFixed(0)} mm
@@ -394,7 +400,7 @@ function Part3DPreview({ quoteId, formData, analysisResult, selectedFeatureIndex
         )}
       </div>
       <div className="viewport-help">
-        <div>🖱 拖拽旋转 | 滚轮缩放 | 右键平移</div>
+        <div>{has2DDrawing ? '滚轮缩放 | 右键平移 | 点击图元查看特征' : '拖拽旋转 | 滚轮缩放 | 右键平移'}</div>
         {features.length > 0 && (
           <div className="viewport-feature-count">
             {cadEntityCount > 0 && `${cadEntityCount} 实体 · `}
@@ -403,12 +409,12 @@ function Part3DPreview({ quoteId, formData, analysisResult, selectedFeatureIndex
         )}
       </div>
       <div className={`model-source-badge ${modelInfo.type || 'none'}`}>{modelLabel}</div>
-      {(hasParametricModel || hasStepModel) && <button type="button" className="model-edge-toggle" onClick={() => setShowEdges(value => !value)}>{showEdges ? '隐藏轮廓' : '显示轮廓'}</button>}
-      {loadingModel && <div className="model-message">正在加载原始 STEP/STP 三维模型…</div>}
-      {!loadingModel && !hasParametricModel && !hasStepModel && <div className="model-message error">{modelError || modelInfo.label || '未识别到可生成实体的闭合轮廓。请修正图纸或上传 STEP/STP 文件。'}</div>}
+      {hasStepModel && <button type="button" className="model-edge-toggle" onClick={() => setShowEdges(value => !value)}>{showEdges ? '隐藏轮廓' : '显示轮廓'}</button>}
+      {loadingModel && <div className="model-message">正在加载原始三维模型…</div>}
+      {!loadingModel && !has2DDrawing && !hasStepModel && <div className="model-message error">{modelError || modelInfo.label || '未识别到可渲染的图纸实体，请检查文件后重试。'}</div>}
 
       <Canvas
-        camera={{ position: [8, 5, 8], fov: 45, near: 0.1, far: 100 }}
+        camera={has2DDrawing ? { position: [0, 0, 10], fov: 45, near: 0.1, far: 100 } : { position: [8, 5, 8], fov: 45, near: 0.1, far: 100 }}
         style={{ background: 'transparent' }}
       >
         <ambientLight intensity={0.5} />
@@ -418,9 +424,9 @@ function Part3DPreview({ quoteId, formData, analysisResult, selectedFeatureIndex
 
         {hasStepModel
           ? <StepMeshModel model={stepModel} showEdges={showEdges} selectedFeature={features[selectedFeatureIndex] || features[0]} features={features} selectedFeatureIndex={selectedFeatureIndex} onSelectFeature={onSelectFeature} />
-          : hasParametricModel && <ParametricPartModel modelSpec={modelSpec} formData={formData} features={features} selectedFeatureIndex={selectedFeatureIndex} showContours={showEdges} onSelectFeature={onSelectFeature} />}
+          : has2DDrawing && <Drawing2DModel features={features} bounds={cadBounds} selectedFeatureIndex={selectedFeatureIndex} onSelectFeature={onSelectFeature} />}
 
-        <Grid
+        {!has2DDrawing && <Grid
           position={[0, -0.01, 0]}
           args={[20, 20]}
           cellSize={0.5}
@@ -431,15 +437,17 @@ function Part3DPreview({ quoteId, formData, analysisResult, selectedFeatureIndex
           sectionColor="#1c5a78"
           fadeDistance={30}
           infiniteGrid
-        />
+        />}
         <OrbitControls
           enableDamping
           dampingFactor={0.1}
           enableZoom
           zoomSpeed={0.85}
+          enableRotate={!has2DDrawing}
+          screenSpacePanning={has2DDrawing}
           minDistance={2}
           maxDistance={80}
-          target={[0, 0.5, 0]}
+          target={has2DDrawing ? [0, 0, 0] : [0, 0.5, 0]}
         />
       </Canvas>
     </div>
@@ -1423,13 +1431,78 @@ function Field({ label, name, value, onChange, type = 'text', children, ...props
   return <label className="console-field"><span>{label}</span>{children || <input type={type} name={name} value={value} onChange={onChange} {...props} />}</label>;
 }
 
-function FeatureReviewWorkspace({ quoteId, formData, quote, analysisResult, selectedFeatureIndex, onSelectFeature, onChange, onBack, onCalculate, loading }) {
+function SpecField({ label, value, onChange, type = 'text', placeholder = '' }) {
+  return <label className="spec-field"><span>{label}</span><input type={type} value={value ?? ''} onChange={onChange} placeholder={placeholder} /></label>;
+}
+
+const num = v => { const n = typeof v === 'string' ? parseFloat(v) : Number(v); return Number.isFinite(n) ? n : 0; };
+
+// 工序确认面板：填值即选中，实时汇总 R/S/T/U/V/W
+function ProcessConfirmPanel({ catalog, processInputs, onProcessInput, onToggleProcess, onEditProcessRate, preview, netWeight }) {
+  const groups = [
+    { title: '机加工（填加工时长=选中）', types: ['time'] },
+    { title: '损耗率型（填损耗率=选中）', types: ['percentage'] },
+    { title: '重量型（勾选=选中）', types: ['weight'] },
+    { title: '固定金额型（填金额=选中）', types: ['manual'] }
+  ];
+  return <div className="process-confirm-panel">
+    <div className="mini-panel-title"><span>工序确认</span><b>填值即选中</b></div>
+    <div className="process-list">
+      {groups.map(g => {
+        const items = (catalog.processes || []).filter(p => g.types.includes(p.costType));
+        if (!items.length) return null;
+        return <div className="process-group" key={g.title}>
+          <div className="process-group-title">{g.title}</div>
+          {items.map(p => {
+            const inp = processInputs[p.code] || {};
+            return <div className="process-row" key={p.code}>
+              <span className="process-name">{p.name}</span>
+              {p.costType === 'time' && <>
+                <input className="proc-input" type="number" placeholder="分钟" value={inp.minutes ?? ''} onChange={e => onProcessInput(p.code, 'minutes', e.target.value)} />
+                <span className="process-rate">@{p.hourlyRate}元/h<button type="button" className="rate-edit-btn" onClick={() => onEditProcessRate(p)} title="维护工费率">改</button></span>
+              </>}
+              {p.costType === 'percentage' && <>
+                <input className="proc-input" type="number" step="0.01" placeholder="损耗率" value={inp.rate ?? ''} onChange={e => onProcessInput(p.code, 'rate', e.target.value)} />
+                <span className="process-rate">×R</span>
+              </>}
+              {p.costType === 'weight' && <>
+                <input type="checkbox" checked={!!inp.enabled} onChange={e => onToggleProcess(p.code, e.target.checked)} />
+                <span className="process-rate">{p.unitRate}×净重({netWeight || 0})</span>
+              </>}
+              {p.costType === 'manual' && <>
+                <input className="proc-input" type="number" placeholder="金额" value={inp.amount ?? ''} onChange={e => onProcessInput(p.code, 'amount', e.target.value)} />
+                <span className="process-rate">元</span>
+              </>}
+            </div>;
+          })}
+        </div>;
+      })}
+    </div>
+    {preview && <div className="process-summary">
+      <div><span>机加工 R</span><strong>{money(preview.R)}</strong></div>
+      <div><span>附加合计</span><strong>{money(preview.additionsTotal)}</strong></div>
+      <div><span>管销 S</span><strong>{money(preview.S)}</strong></div>
+      <div><span>小计 T</span><strong>{money(preview.T)}</strong></div>
+      <div><span>利润 U</span><strong>{money(preview.U)}</strong></div>
+      <div><span>含税 V</span><strong>{money(preview.V)}</strong></div>
+      <div className="highlight"><span>样品价 W</span><strong>{money(preview.W)}</strong></div>
+    </div>}
+  </div>;
+}
+
+function FeatureReviewWorkspace({ quoteId, formData, quote, analysisResult, selectedFeatureIndex, onSelectFeature, onChange, onSpecChange, catalog, processInputs, onProcessInput, onToggleProcess, onEditProcessRate, preview, onBack, onCalculate, loading }) {
   const features = analysisResult?.features || [];
-  const selected = features[selectedFeatureIndex] || features[0];
+  const is2DDrawing = (analysisResult?.modelInfo || analysisResult?.cadInfo?.modelInfo)?.type === 'drawing2d';
   const dimensions = analysisResult?.dimensions || formData;
   const metrics = [['长度', dimensions.length, 'mm'], ['宽度', dimensions.width, 'mm'], ['高度', dimensions.height, 'mm'], ['直径', dimensions.diameter, 'mm'], ['特征', features.length, '项'], ['实体', analysisResult?.cadInfo?.entityCount, '个']];
+  const blankSpec = formData.blankSpec || {};
+  const finishedSpec = formData.finishedSpec || {};
+  const specField = (type, key) => ({
+    value: (type === 'blank' ? blankSpec[key] : finishedSpec[key]) ?? '',
+    onChange: e => onSpecChange(type, key, e.target.value)
+  });
   return <div className="feature-review">
-    <WorkspaceTitle eyebrow="STEP 03 / FEATURE REVIEW" title="确认特征与三维模型" description="选择特征即可聚焦模型中的对应色块；参数可在此处人工复核。" badge={analysisResult?.modelInfo?.label || 'CAD 模型已载入'} />
+    <WorkspaceTitle eyebrow="STEP 03 / FEATURE REVIEW" title={is2DDrawing ? '确认图纸特征与成本参数' : '确认特征与成本参数'} description="参照渲染图纸核对尺寸，填写材料/产品规格，并在右侧确认工序与单价后计算报价。" badge={analysisResult?.modelInfo?.label || 'CAD 模型已载入'} />
     <div className="review-layout">
       <aside className="review-feature-panel">
         <div className="mini-panel-title"><span>识别特征</span><b>{features.length} 项</b></div>
@@ -1443,23 +1516,70 @@ function FeatureReviewWorkspace({ quoteId, formData, quote, analysisResult, sele
         </div>
       </aside>
       <section className="review-model-panel">
-        <div className="metric-grid compact">{metrics.map(([label, value, unit]) => <div className="metric-card" key={label}><small>{label}</small><strong>{value ?? '—'}<em>{unit}</em></strong></div>)}</div>
+        <div className="metric-grid compact">{metrics.map(([label, value, unit]) => <div className="metric-card" key={label}><small>{label}</small><strong>{value ?? '-'}<em>{unit}</em></strong></div>)}</div>
         <Part3DPreview quoteId={quoteId} formData={formData} analysisResult={analysisResult} selectedFeatureIndex={selectedFeatureIndex} onSelectFeature={onSelectFeature} />
-        <p className="review-model-help">拖拽旋转 · 滚轮缩放 · 点击色块或左侧特征查看关联位置</p>
+        <p className="review-model-help">{is2DDrawing ? '滚轮缩放 · 右键平移 · 点击图元或左侧特征查看关联位置' : '拖拽旋转 · 滚轮缩放 · 点击色块或左侧特征查看关联位置'}</p>
       </section>
-      <aside className="review-detail-panel">
-        <div className="mini-panel-title"><span>当前特征</span><b>{selected ? `#${String(selectedFeatureIndex + 1).padStart(2, '0')}` : '摘要'}</b></div>
-        {selected ? <><div className="selected-feature-title"><span>{getFeatureStyle(selected.type).icon}</span><div><small>选中特征</small><h3>{selected.type}</h3></div></div><div className="detail-grid"><div><small>复杂度</small><strong>{analysisResult?.complexity || '中等'}</strong></div><div><small>映射状态</small><strong>已关联</strong></div></div><div className="recognition-basis"><small>识别依据</small><p>{selected.description || '基于 CAD 几何信息提取。'}</p></div></> : <div className="console-empty">暂无可展示的特征详情。</div>}
-        <div className="review-file-note"><small>当前图纸</small><strong>{fileName(quote?.drawingPath)}</strong></div>
+      <aside className="review-detail-panel process-confirm-wrap">
+        <ProcessConfirmPanel catalog={catalog} processInputs={processInputs} onProcessInput={onProcessInput} onToggleProcess={onToggleProcess} onEditProcessRate={onEditProcessRate} preview={preview} netWeight={num(finishedSpec['净重'])} />
       </aside>
     </div>
     <section className="parameter-console">
-      <div className="mini-panel-title"><span>参数修正</span><b>修改后将重新计算报价</b></div>
-      <div className="console-form-grid">
-        <Field label="零件名称" name="partName" value={formData.partName} onChange={onChange} /><Field label="零件编号" name="partNumber" value={formData.partNumber} onChange={onChange} />
-        <Field label="材料" name="material" value={formData.material} onChange={onChange}><select name="material" value={formData.material} onChange={onChange}><option value="钢材">钢材</option><option value="铝材">铝材</option><option value="铜材">铜材</option><option value="不锈钢">不锈钢</option></select></Field>
-        <Field label="精度" name="precision" value={formData.precision} onChange={onChange}><select name="precision" value={formData.precision} onChange={onChange}><option value="低">低</option><option value="中等">中等</option><option value="高">高</option><option value="极高">极高</option></select></Field>
-        <Field label="长度 (mm)" type="number" name="length" value={formData.length} onChange={onChange} /><Field label="宽度 (mm)" type="number" name="width" value={formData.width} onChange={onChange} /><Field label="高度 (mm)" type="number" name="height" value={formData.height} onChange={onChange} /><Field label="直径 (mm)" type="number" name="diameter" value={formData.diameter} onChange={onChange} /><Field label="数量" type="number" min="1" name="quantity" value={formData.quantity} onChange={onChange} /><Field label="交货期" type="date" name="deliveryDate" value={formData.deliveryDate} onChange={onChange} />
+      <div className="mini-panel-title"><span>参数修正</span><b>参照图纸核对规格与单价</b></div>
+      <div className="spec-section">
+        <div className="spec-section-title">基本信息</div>
+        <div className="console-form-grid">
+          <Field label="零件名称" name="partName" value={formData.partName} onChange={onChange} />
+          <Field label="物料编码" name="materialCode" value={formData.materialCode} onChange={onChange} />
+          <Field label="材料" name="material" value={formData.material} onChange={onChange}>
+            <select name="material" value={formData.material} onChange={onChange}>
+              {(catalog.materials || []).map(m => <option key={m.id} value={m.code}>{m.name}（{m.priceStale ? '单价待确认' : `¥${m.unitPrice}/kg`}）</option>)}
+            </select>
+          </Field>
+          <Field label="数量" type="number" min="1" name="quantity" value={formData.quantity} onChange={onChange} />
+          <Field label="精度" name="precision" value={formData.precision} onChange={onChange}>
+            <select name="precision" value={formData.precision} onChange={onChange}><option value="低">低</option><option value="中等">中等</option><option value="高">高</option><option value="极高">极高</option></select>
+          </Field>
+          <Field label="交货期" type="date" name="deliveryDate" value={formData.deliveryDate} onChange={onChange} />
+        </div>
+      </div>
+      <div className="spec-section">
+        <div className="spec-section-title">材料规格（毛坯）</div>
+        <div className="spec-edit-grid">
+          <SpecField label="材质" {...specField('blank', '材质')} />
+          <SpecField label="料长(mm)" type="number" {...specField('blank', '料长')} />
+          <SpecField label="步距(mm)" type="number" {...specField('blank', '步距')} />
+          <SpecField label="料宽(mm)" type="number" {...specField('blank', '料宽')} />
+          <SpecField label="外径(mm)" type="number" {...specField('blank', '外径')} />
+          <SpecField label="内径(mm)" type="number" {...specField('blank', '内径')} />
+          <SpecField label="料厚(mm)" type="number" {...specField('blank', '料厚')} />
+          <SpecField label="毛重(kg)" type="number" step="0.0001" {...specField('blank', '毛重')} />
+          <SpecField label="MOQ" type="number" {...specField('blank', 'MOQ')} />
+        </div>
+      </div>
+      <div className="spec-section">
+        <div className="spec-section-title">产品规格（成品）</div>
+        <div className="spec-edit-grid">
+          <SpecField label="料长(mm)" type="number" {...specField('finished', '料长')} />
+          <SpecField label="料宽(mm)" type="number" {...specField('finished', '料宽')} />
+          <SpecField label="外径(mm)" type="number" {...specField('finished', '外径')} />
+          <SpecField label="料厚(mm)" type="number" {...specField('finished', '料厚')} />
+          <SpecField label="净重(kg)" type="number" step="0.0001" {...specField('finished', '净重')} />
+        </div>
+      </div>
+      <div className="spec-section">
+        <div className="spec-section-title">单价确认</div>
+        <div className="console-form-grid">
+          <Field label="材料单价(元/kg)" type="number" step="0.01" name="unitPrice" value={formData.unitPrice} onChange={onChange} />
+          <Field label="打样调机费" type="number" name="setupFee" value={formData.setupFee} onChange={onChange} />
+          <Field label="报价策略" name="strategyId" value={formData.strategyId} onChange={onChange}>
+            <select name="strategyId" value={formData.strategyId} onChange={onChange}>
+              <option value="">默认</option>
+              {(catalog.strategies || []).map(s => <option key={s.id} value={s.id}>{s.name}（管销{s.overheadRate}/利润{s.profitRate}/倍率{s.sampleMultiplier}）</option>)}
+            </select>
+          </Field>
+        </div>
+        <p className="price-warn">⚠️ 市场价格波动，请确认最新单价后再计算；此单价将作为本次报价的价格快照留存。</p>
       </div>
       <div className="workspace-actions"><button type="button" className="secondary-action" onClick={onBack}>返回分析</button><button type="button" className="primary-action" disabled={loading} onClick={onCalculate}>{loading ? '计算中…' : '确认参数并计算报价'}</button></div>
     </section>
@@ -1476,17 +1596,81 @@ function AIQuoteCreation() {
   const [error, setError] = useState(null);
   const [dragActive, setDragActive] = useState(false);
   const [selectedFeatureIndex, setSelectedFeatureIndex] = useState(0);
-  const [formData, setFormData] = useState({ partName: '', partNumber: '', material: '钢材', length: '', width: '', height: '', diameter: '', quantity: 1, deliveryDate: '', precision: '中等' });
+  const [catalog, setCatalog] = useState({ materials: [], processes: [], strategies: [] });
+  const [processInputs, setProcessInputs] = useState({});
+  const [formData, setFormData] = useState({
+    partName: '', partNumber: '', materialCode: '', material: 'S31603',
+    quantity: 1, precision: '中等', deliveryDate: '',
+    length: '', width: '', height: '', diameter: '',
+    blankSpec: { '材质': 'S31603', '料长': '', '步距': '', '料宽': '', '外径': '', '内径': '', '料厚': '', '毛重': '', 'MOQ': '' },
+    finishedSpec: { '料长': '', '料宽': '', '外径': '', '料厚': '', '净重': '' },
+    unitPrice: '', setupFee: 300, strategyId: ''
+  });
+
+  useEffect(() => {
+    Promise.all([catalogApi.getMaterials(), catalogApi.getProcesses(), catalogApi.getStrategies()])
+      .then(([m, p, s]) => setCatalog({ materials: m.data, processes: p.data, strategies: s.data }))
+      .catch(() => { /* 目录加载失败不阻塞流程 */ });
+  }, []);
+
   const completedStep = analysisResult?.aiQuotation ? 5 : quote?.calculation ? 4 : analysisResult ? 3 : quote ? 2 : 1;
   const handleFormChange = (event) => setFormData(data => ({ ...data, [event.target.name]: event.target.value }));
+  const handleSpecChange = (type, key, value) => setFormData(data => {
+    const fieldKey = type === 'blank' ? 'blankSpec' : 'finishedSpec';
+    return { ...data, [fieldKey]: { ...data[fieldKey], [key]: value } };
+  });
   const chooseFile = (file) => { if (file) { setSelectedFile(file); setError(null); } };
+  const onProcessInput = (code, field, value) => setProcessInputs(s => ({ ...s, [code]: { ...(s[code] || {}), [field]: value } }));
+  const onToggleProcess = (code, checked) => setProcessInputs(s => ({ ...s, [code]: { ...(s[code] || {}), enabled: checked } }));
+  const onEditProcessRate = async (p) => {
+    const newRate = window.prompt(`维护「${p.name}」工费率（元/h）`, p.hourlyRate);
+    if (newRate == null || newRate === '') return;
+    try {
+      await catalogApi.updateProcess(p.id, { hourlyRate: newRate, changeReason: '前端内联维护' });
+      setCatalog(c => ({ ...c, processes: c.processes.map(x => x.id === p.id ? { ...x, hourlyRate: num(newRate) } : x) }));
+    } catch (e) { setError('工费率更新失败'); }
+  };
+
+  const resolveStrategy = () => (catalog.strategies || []).find(s => String(s.id) === String(formData.strategyId)) || (catalog.strategies || [])[0] || { overheadRate: 0.1, profitRate: 0.3, taxRate: 0.13, sampleMultiplier: 1, materialLossRate: 0.05, toolLossRate: 0.08 };
+
+  const preview = useMemo(() => {
+    const strategy = resolveStrategy();
+    const grossWeight = num(formData.blankSpec?.['毛重']);
+    const netWeight = num(formData.finishedSpec?.['净重']);
+    const price = num(formData.unitPrice);
+    const K = grossWeight * price;
+    let R = 0;
+    (catalog.processes || []).filter(p => p.costType === 'time').forEach(p => {
+      const mins = num(processInputs[p.code]?.minutes);
+      if (mins > 0) R += (num(p.hourlyRate) / 60) * mins;
+    });
+    let additionsTotal = 0;
+    (catalog.processes || []).filter(p => p.costType !== 'time').forEach(p => {
+      const inp = processInputs[p.code] || {};
+      if (p.costType === 'percentage') {
+        const rate = (inp.rate !== '' && inp.rate != null) ? num(inp.rate) : (p.code === 'material-loss' ? num(strategy.materialLossRate) : p.code === 'tool-loss' ? num(strategy.toolLossRate) : 0);
+        if (rate > 0) additionsTotal += R * rate;
+      } else if (p.costType === 'weight') {
+        if (inp.enabled) additionsTotal += num(p.unitRate) * netWeight;
+      } else if (p.costType === 'manual') {
+        const amt = num(inp.amount);
+        if (amt > 0) additionsTotal += amt;
+      }
+    });
+    const S = (R + additionsTotal) * num(strategy.overheadRate);
+    const T = K + R + S + additionsTotal;
+    const U = T * num(strategy.profitRate);
+    const V = (T + U) * (1 + num(strategy.taxRate));
+    const W = V * num(strategy.sampleMultiplier);
+    return { K, R, additionsTotal, S, T, U, V, W };
+  }, [catalog, processInputs, formData.blankSpec, formData.finishedSpec, formData.unitPrice, formData.strategyId]);
 
   const createQuote = async () => {
-    if (!selectedFile && !formData.partName) { setError('请至少上传一份图纸，或填写零件名称后再继续。'); return; }
+    if (!selectedFile) { setError('请上传一份图纸后再继续。'); return; }
     setLoading(true); setError(null);
     try {
-      const drawingPath = selectedFile ? (await uploadApi.uploadDrawing(selectedFile)).data.filename : quote?.drawingPath || null;
-      const response = await quoteApi.create({ ...formData, drawingPath });
+      const drawingPath = (await uploadApi.uploadDrawing(selectedFile)).data.filename;
+      const response = await quoteApi.create({ drawingPath, partName: selectedFile.name.replace(/\.[^.]+$/, '') });
       setQuoteId(response.data.id); setQuote(response.data); setAnalysisResult(null); setStep(2);
     } catch (err) { setError(err.response?.data?.error || '创建报价任务失败'); } finally { setLoading(false); }
   };
@@ -1496,26 +1680,63 @@ function AIQuoteCreation() {
     try {
       const response = await quoteApi.analyzeDrawing(quoteId, { drawingPath: quote.drawingPath, context: '请详细分析这张机加工图纸' });
       setAnalysisResult(response.data.analysis); setSelectedFeatureIndex(0);
-      if (response.data.quote) { setQuote(response.data.quote); setFormData(data => ({ ...data, partName: response.data.quote.partName || '', partNumber: response.data.quote.partNumber || '', material: response.data.quote.material || '钢材', length: response.data.quote.length || '', width: response.data.quote.width || '', height: response.data.quote.height || '', diameter: response.data.quote.diameter || '', quantity: response.data.quote.quantity || 1, precision: response.data.quote.precision || '中等' })); }
+      if (response.data.quote) {
+        const q = response.data.quote;
+        const dims = response.data.analysis?.dimensions || {};
+        setFormData(d => ({
+          ...d,
+          partName: q.partName || d.partName,
+          material: q.material || d.material,
+          length: q.length ?? '', width: q.width ?? '', height: q.height ?? '', diameter: q.diameter ?? '',
+          quantity: q.quantity || 1, precision: q.precision || '中等',
+          blankSpec: { ...d.blankSpec, '材质': q.material || d.blankSpec['材质'], '料长': dims.length ?? d.blankSpec['料长'], '料宽': dims.width ?? d.blankSpec['料宽'], '料厚': dims.height ?? d.blankSpec['料厚'], '外径': dims.diameter ?? d.blankSpec['外径'] },
+          finishedSpec: { ...d.finishedSpec, '料长': dims.length ?? d.finishedSpec['料长'], '料宽': dims.width ?? d.finishedSpec['料宽'], '料厚': dims.height ?? d.finishedSpec['料厚'], '外径': dims.diameter ?? d.finishedSpec['外径'] }
+        }));
+      }
       setStep(3);
     } catch (err) { setError(err.response?.data?.error || '图纸分析失败'); } finally { setLoading(false); }
   };
   const calculateQuote = async () => {
     setLoading(true); setError(null);
-    try { await quoteApi.update(quoteId, formData); const response = await quoteApi.calculate(quoteId); setQuote(response.data); setStep(4); } catch (err) { setError(err.response?.data?.error || '计算报价失败'); } finally { setLoading(false); }
+    try {
+      const grossWeight = num(formData.blankSpec?.['毛重']);
+      const netWeight = num(formData.finishedSpec?.['净重']);
+      await quoteApi.update(quoteId, {
+        partName: formData.partName, materialCode: formData.materialCode, material: formData.material,
+        quantity: formData.quantity, precision: formData.precision, deliveryDate: formData.deliveryDate,
+        grossWeight, netWeight, moq: num(formData.blankSpec?.['MOQ']) || null,
+        blankSpec: formData.blankSpec, finishedSpec: formData.finishedSpec
+      });
+      const strategy = resolveStrategy();
+      const processSelection = (catalog.processes || []).map(p => {
+        const inp = processInputs[p.code] || {};
+        if (p.costType === 'time') { const mins = num(inp.minutes); return mins > 0 ? { processCode: p.code, costType: 'time', hourlyRate: num(p.hourlyRate), minutes: mins } : null; }
+        if (p.costType === 'percentage') { const rate = (inp.rate !== '' && inp.rate != null) ? num(inp.rate) : (p.code === 'material-loss' ? num(strategy.materialLossRate) : p.code === 'tool-loss' ? num(strategy.toolLossRate) : 0); return rate > 0 ? { processCode: p.code, costType: 'percentage', rate } : null; }
+        if (p.costType === 'weight') { return inp.enabled ? { processCode: p.code, costType: 'weight', unitRate: num(p.unitRate) } : null; }
+        if (p.costType === 'manual') { const amt = num(inp.amount); return amt > 0 ? { processCode: p.code, costType: 'manual', amount: amt } : null; }
+        return null;
+      }).filter(Boolean);
+      const response = await quoteApi.calculate(quoteId, {
+        processSelection,
+        unitPrice: formData.unitPrice !== '' ? num(formData.unitPrice) : undefined,
+        strategyId: formData.strategyId || undefined,
+        setupFee: num(formData.setupFee)
+      });
+      setQuote(response.data); setStep(4);
+    } catch (err) { setError(err.response?.data?.error || '计算报价失败'); } finally { setLoading(false); }
   };
   const requestAiQuote = async () => {
     setLoading(true); setError(null);
     try { const response = await quoteApi.aiQuote(quoteId, { useAnalysisData: true }); setQuote(response.data.quote); setAnalysisResult(result => ({ ...(result || {}), aiQuotation: response.data.aiAnalysis })); setStep(5); } catch (err) { setError(err.response?.data?.error || 'AI 报价分析失败'); } finally { setLoading(false); }
   };
 
-  const renderStep1 = () => <div className="step-workspace"><WorkspaceTitle eyebrow="STEP 01 / INTAKE" title="创建零件分析任务" description="上传 CAD 图纸，补充少量业务信息，即可开始智能解析。" badge="支持 DWG · DXF · STEP · STP" /><div className="intake-grid"><section className={`drop-zone ${dragActive ? 'dragging' : ''}`} onDragOver={event => { event.preventDefault(); setDragActive(true); }} onDragLeave={() => setDragActive(false)} onDrop={event => { event.preventDefault(); setDragActive(false); chooseFile(event.dataTransfer.files?.[0]); }}><span className="drop-zone-orbit" /><div className="drop-zone-icon">CAD</div><h3>{selectedFile ? selectedFile.name : '拖拽图纸到此处'}</h3><p>{selectedFile ? `${(selectedFile.size / 1024 / 1024).toFixed(2)} MB · 等待建立分析任务` : '或从本地选择文件。二维图纸与三维模型均可解析。'}</p><label className="secondary-action file-picker">选择图纸<input type="file" accept=".dwg,.dxf,.step,.stp,.png,.jpg,.jpeg,.pdf" onChange={event => chooseFile(event.target.files?.[0])} /></label><div className="format-chips"><span>DWG</span><span>DXF</span><span>STEP</span><span>STP</span><span>PDF / 图片</span></div></section><section className="parameter-console intake-form"><div className="mini-panel-title"><span>零件基础信息</span><b>可选，AI 将自动补全</b></div><div className="console-form-grid two-columns"><Field label="零件名称" name="partName" value={formData.partName} onChange={handleFormChange} /><Field label="零件编号" name="partNumber" value={formData.partNumber} onChange={handleFormChange} /><Field label="材料" name="material" value={formData.material} onChange={handleFormChange}><select name="material" value={formData.material} onChange={handleFormChange}><option value="钢材">钢材</option><option value="铝材">铝材</option><option value="铜材">铜材</option><option value="不锈钢">不锈钢</option></select></Field><Field label="精度" name="precision" value={formData.precision} onChange={handleFormChange}><select name="precision" value={formData.precision} onChange={handleFormChange}><option value="低">低</option><option value="中等">中等</option><option value="高">高</option><option value="极高">极高</option></select></Field><Field label="数量" type="number" min="1" name="quantity" value={formData.quantity} onChange={handleFormChange} /><Field label="交货期" type="date" name="deliveryDate" value={formData.deliveryDate} onChange={handleFormChange} /></div><div className="workspace-actions"><button type="button" className="primary-action" onClick={createQuote} disabled={loading}>{loading ? '正在建立任务…' : '建立分析任务'}</button></div></section></div></div>;
+  const renderStep1 = () => <div className="step-workspace"><WorkspaceTitle eyebrow="STEP 01 / INTAKE" title="上传机加工图纸" description="先选择图纸建立任务；材料规格、产品规格与工序将在第3步参照解析结果确认。" badge="支持 DWG · DXF · STEP · STP" /><div className="intake-grid intake-single"><section className={`drop-zone ${dragActive ? 'dragging' : ''}`} onDragOver={event => { event.preventDefault(); setDragActive(true); }} onDragLeave={() => setDragActive(false)} onDrop={event => { event.preventDefault(); setDragActive(false); chooseFile(event.dataTransfer.files?.[0]); }}><span className="drop-zone-orbit" /><div className="drop-zone-icon">CAD</div><h3>{selectedFile ? selectedFile.name : '拖拽图纸到此处'}</h3><p>{selectedFile ? `${(selectedFile.size / 1024 / 1024).toFixed(2)} MB · 等待建立分析任务` : '或从本地选择文件。二维图纸与三维模型均可解析。'}</p><label className="secondary-action file-picker">选择图纸<input type="file" accept=".dwg,.dxf,.step,.stp,.png,.jpg,.jpeg,.pdf" onChange={event => chooseFile(event.target.files?.[0])} /></label><div className="format-chips"><span>DWG</span><span>DXF</span><span>STEP</span><span>STP</span><span>PDF / 图片</span></div></section><div className="workspace-actions"><button type="button" className="primary-action" onClick={createQuote} disabled={loading}>{loading ? '正在建立任务…' : '建立分析任务'}</button></div></div></div>;
   const renderStep2 = () => <div className="step-workspace"><WorkspaceTitle eyebrow="STEP 02 / AI PARSING" title="智能解析 CAD 图纸" description="系统会识别几何轮廓、尺寸、特征与模型来源，并准备进入人工复核。" badge={fileExtension(quote?.drawingPath)} /><div className="analysis-command"><div className="command-orb">AI</div><div><span className="eyebrow">READY TO ANALYZE</span><h3>{fileName(quote?.drawingPath)}</h3><p>已建立零件任务。开始分析后，系统将提取几何信息并生成特征确认视图。</p></div><button type="button" className="primary-action" onClick={analyzeDrawing} disabled={loading}>{loading ? '正在解析…' : '开始 AI 分析'}</button></div><div className="status-card-grid"><div><span>输入格式</span><strong>{fileExtension(quote?.drawingPath)}</strong><small>CAD 文件已就绪</small></div><div><span>解析范围</span><strong>几何 + 特征</strong><small>尺寸、轮廓、孔位</small></div><div><span>下一节点</span><strong>人工确认</strong><small>进入三维模型复核</small></div></div><div className="workspace-actions"><button type="button" className="secondary-action" onClick={() => setStep(1)}>返回上传</button></div></div>;
-  const renderStep4 = () => { const calc = quote?.calculation; const costs = [['材料成本', calc?.materialCost], ['人工成本', calc?.laborCost], ['设备费用', calc?.equipmentCost], ['管理费用', calc?.overheadCost], ['利润', calc?.profit]]; return <div className="step-workspace"><WorkspaceTitle eyebrow="STEP 04 / PRICING" title="报价成本计算结果" description="费用构成基于已确认的材料、尺寸、精度与数量生成。" badge={calc ? '报价已计算' : '等待计算'} />{calc ? <><div className="quote-result-hero"><div><span>参考总价</span><strong>{money(calc.total)}</strong><small>单价 {money(calc.unitPrice)} · 数量 {formData.quantity}</small></div><span>CALCULATED</span></div><div className="cost-card-grid">{costs.map(([label, value]) => <div key={label}><span>{label}</span><strong>{money(value)}</strong></div>)}</div><div className="workspace-actions"><button type="button" className="secondary-action" onClick={() => setStep(3)}>返回修改参数</button><button type="button" className="primary-action" onClick={requestAiQuote} disabled={loading}>{loading ? 'AI 分析中…' : '生成 AI 报价建议'}</button></div></> : <div className="console-empty">尚未取得报价结果，请先完成特征确认。</div>}</div>; };
-  const renderStep5 = () => { const ai = analysisResult?.aiQuotation; const groups = [['材料推荐', ai?.materialRecommendation ? [ai.materialRecommendation] : []], ['工艺建议', ai?.processSuggestions?.map(item => `${item.process}：${item.reason}`) || []], ['风险提示', ai?.warningPoints || []], ['优化建议', ai?.suggestions || []]]; return <div className="step-workspace"><WorkspaceTitle eyebrow="STEP 05 / DELIVERY" title="报价交付与 AI 建议" description="汇总报价结论、工艺判断和关键风险，支持返回任意已完成步骤复核。" badge="交付就绪" /><div className="delivery-total"><span>最终参考报价</span><strong>{money(quote?.calculation?.total)}</strong><small>{formData.partName || '未命名零件'} · {formData.material} · {formData.quantity} 件</small></div><div className="advice-grid">{groups.map(([title, items]) => <section key={title}><h3>{title}</h3>{items.length ? <ul>{items.map((item, index) => <li key={index}>{item}</li>)}</ul> : <p>暂无额外建议。</p>}</section>)}</div><div className="workspace-actions"><button type="button" className="secondary-action" onClick={() => setStep(4)}>返回报价计算</button><Link className="primary-action link-action" to={`/quotes/${quoteId}`}>查看报价详情</Link><Link className="secondary-action link-action" to="/quotes">返回报价列表</Link></div></div>; };
-  const mainContent = step === 1 ? renderStep1() : step === 2 ? renderStep2() : step === 3 ? <FeatureReviewWorkspace quoteId={quoteId} formData={formData} quote={quote} analysisResult={analysisResult} selectedFeatureIndex={selectedFeatureIndex} onSelectFeature={setSelectedFeatureIndex} onChange={handleFormChange} onBack={() => setStep(2)} onCalculate={calculateQuote} loading={loading} /> : step === 4 ? renderStep4() : renderStep5();
+  const renderStep4 = () => { const calc = quote?.calculation; const costs = [['材料成本 K', calc?.materialCost], ['机加工成本 R', calc?.machiningCost], ['管销 S', calc?.overhead], ['小计 T', calc?.subtotal], ['利润 U', calc?.profit], ['含税 V', calc?.taxIncluded], ['样品价 W', calc?.samplePrice], ['调机费', calc?.setupFee]]; return <div className="step-workspace"><WorkspaceTitle eyebrow="STEP 04 / PRICING" title="报价成本计算结果" description="费用按 K→R→S→T→U→V→W 公式链生成，可返回第3步调整工序与单价。" badge={calc ? '报价已计算' : '等待计算'} />{calc ? <><div className="quote-result-hero"><div><span>参考总价</span><strong>{money(calc.total)}</strong><small>单价 {money(calc.unitPrice)} · 数量 {formData.quantity}</small></div><span>CALCULATED</span></div><div className="cost-card-grid">{costs.map(([label, value]) => <div key={label}><span>{label}</span><strong>{money(value)}</strong></div>)}</div><div className="workspace-actions"><button type="button" className="secondary-action" onClick={() => setStep(3)}>返回修改参数</button><button type="button" className="primary-action" onClick={requestAiQuote} disabled={loading}>{loading ? 'AI 分析中…' : '生成 AI 报价建议'}</button></div></> : <div className="console-empty">尚未取得报价结果，请先完成特征确认。</div>}</div>; };
+  const renderStep5 = () => { const ai = analysisResult?.aiQuotation; const groups = [['材料推荐', ai?.materialRecommendation ? [ai.materialRecommendation] : []], ['工艺建议', ai?.processSuggestions?.map(item => `${item.process || item.name}：${item.reason}`) || []], ['风险提示', ai?.warningPoints || []], ['优化建议', ai?.suggestions || []]]; return <div className="step-workspace"><WorkspaceTitle eyebrow="STEP 05 / DELIVERY" title="报价交付与 AI 建议" description="汇总报价结论、工艺判断和关键风险，支持返回任意已完成步骤复核。" badge="交付就绪" /><div className="delivery-total"><span>最终参考报价</span><strong>{money(quote?.calculation?.total)}</strong><small>{formData.partName || '未命名零件'} · {formData.material} · {formData.quantity} 件</small></div><div className="advice-grid">{groups.map(([title, items]) => <section key={title}><h3>{title}</h3>{items.length ? <ul>{items.map((item, index) => <li key={index}>{item}</li>)}</ul> : <p>暂无额外建议。</p>}</section>)}</div><div className="workspace-actions"><button type="button" className="secondary-action" onClick={() => setStep(4)}>返回报价计算</button><Link className="primary-action link-action" to={`/quotes/${quoteId}`}>查看报价详情</Link><Link className="secondary-action link-action" to="/quotes">返回报价列表</Link></div></div>; };
+  const mainContent = step === 1 ? renderStep1() : step === 2 ? renderStep2() : step === 3 ? <FeatureReviewWorkspace quoteId={quoteId} formData={formData} quote={quote} analysisResult={analysisResult} selectedFeatureIndex={selectedFeatureIndex} onSelectFeature={setSelectedFeatureIndex} onChange={handleFormChange} onSpecChange={handleSpecChange} catalog={catalog} processInputs={processInputs} onProcessInput={onProcessInput} onToggleProcess={onToggleProcess} onEditProcessRate={onEditProcessRate} preview={preview} onBack={() => setStep(2)} onCalculate={calculateQuote} loading={loading} /> : step === 4 ? renderStep4() : renderStep5();
   const context = step === 3 ? (analysisResult?.features || []).length : step >= 4 ? money(quote?.calculation?.total) : quote ? fileExtension(quote.drawingPath) : '等待输入';
-  return <div className="ai-quote-page"><main className="cad-console"><header className="console-hero"><div><span className="eyebrow">CAD INTELLIGENCE / QUOTATION WORKBENCH</span><h1>机加工模型分析工作台</h1><p>从图纸解析到报价交付，在同一个精密制造工作台内完成。</p></div><div className="console-hero-status"><span>{quote ? '任务进行中' : '新建任务'}</span><span>{fileExtension(quote?.drawingPath || selectedFile?.name)}</span><span>360° 预览</span></div></header><div className="console-layout"><aside className="workflow-rail"><div className="rail-heading"><span>ANALYSIS FLOW</span><b>{step} / 5</b></div><nav>{WORKFLOW_STEPS.map(item => { const available = item.id <= completedStep; const state = item.id === step ? 'active' : item.id < step || (item.id < completedStep) ? 'done' : 'locked'; return <button key={item.id} type="button" className={`workflow-node ${state}`} disabled={!available} onClick={() => available && setStep(item.id)}><i>{state === 'done' ? '✓' : item.icon}</i><span><strong>{item.title}</strong><small>{item.subtitle}</small></span>{state === 'locked' && <em>LOCK</em>}</button>; })}</nav><div className="rail-footnote"><span>当前任务</span><strong>{quoteId ? `#${quoteId}` : '未创建'}</strong><small>后续步骤将在前置数据完成后自动解锁</small></div></aside><section className="console-main">{error && <div className="console-error">{error}<button type="button" onClick={() => setError(null)}>×</button></div>}{mainContent}</section><aside className="context-rail"><div className="context-title"><span>任务摘要</span><b>LIVE</b></div><div className="context-file"><span className="context-file-type">{fileExtension(quote?.drawingPath || selectedFile?.name)}</span><small>当前图纸</small><strong>{fileName(quote?.drawingPath || selectedFile?.name)}</strong></div><div className="context-stat"><span>{step === 3 ? '识别特征' : step >= 4 ? '当前报价' : '任务状态'}</span><strong>{context}</strong><small>{step === 3 ? '可选择并定位' : step >= 4 ? '含成本构成' : quote ? '等待下一步操作' : '请上传图纸'}</small></div><div className="context-list"><span>数据概览</span><p>材料 <strong>{formData.material}</strong></p><p>数量 <strong>{formData.quantity}</strong></p><p>精度 <strong>{formData.precision}</strong></p><p>模型 <strong>{analysisResult?.modelInfo?.label || '待解析'}</strong></p></div><div className="context-tip"><span>操作提示</span><p>{step === 3 ? '点击特征列表或模型色块，可核对关联的空间位置。' : step === 1 ? '优先上传 DWG、DXF、STEP 或 STP 文件，以获得更完整的解析结果。' : '完成当前任务后，下一阶段将在流程中自动解锁。'}</p></div></aside></div></main></div>;
+  return <div className="ai-quote-page"><main className="cad-console"><header className="console-hero"><div><span className="eyebrow">CAD INTELLIGENCE / QUOTATION WORKBENCH</span><h1>机加工模型分析工作台</h1><p>从图纸解析到报价交付，在同一个精密制造工作台内完成。</p></div><div className="console-hero-status"><span>{quote ? '任务进行中' : '新建任务'}</span><span>{fileExtension(quote?.drawingPath || selectedFile?.name)}</span><span>360° 预览</span></div></header><div className="console-layout"><aside className="workflow-rail"><div className="rail-heading"><span>ANALYSIS FLOW</span><b>{step} / 5</b></div><nav>{WORKFLOW_STEPS.map(item => { const available = item.id <= completedStep; const state = item.id === step ? 'active' : item.id < step || (item.id < completedStep) ? 'done' : 'locked'; return <button key={item.id} type="button" className={`workflow-node ${state}`} disabled={!available} onClick={() => available && setStep(item.id)}><i>{state === 'done' ? '✓' : item.icon}</i><span><strong>{item.title}</strong><small>{item.subtitle}</small></span>{state === 'locked' && <em>LOCK</em>}</button>; })}</nav><div className="rail-footnote"><span>当前任务</span><strong>{quoteId ? `#${quoteId}` : '未创建'}</strong><small>后续步骤将在前置数据完成后自动解锁</small></div></aside><section className="console-main">{error && <div className="console-error">{error}<button type="button" onClick={() => setError(null)}>×</button></div>}{mainContent}</section><aside className="context-rail"><div className="context-title"><span>任务摘要</span><b>LIVE</b></div><div className="context-file"><span className="context-file-type">{fileExtension(quote?.drawingPath || selectedFile?.name)}</span><small>当前图纸</small><strong>{fileName(quote?.drawingPath || selectedFile?.name)}</strong></div><div className="context-stat"><span>{step === 3 ? '识别特征' : step >= 4 ? '当前报价' : '任务状态'}</span><strong>{context}</strong><small>{step === 3 ? '可选择并定位' : step >= 4 ? '含成本构成' : quote ? '等待下一步操作' : '请上传图纸'}</small></div><div className="context-list"><span>数据概览</span><p>材料 <strong>{formData.material}</strong></p><p>毛重 <strong>{formData.blankSpec?.['毛重'] || '-'}</strong></p><p>数量 <strong>{formData.quantity}</strong></p><p>精度 <strong>{formData.precision}</strong></p></div><div className="context-tip"><span>操作提示</span><p>{step === 3 ? '右侧工序确认：填加工时长/损耗率/金额即选中对应工序。' : step === 1 ? '优先上传 DWG、DXF、STEP 或 STP 文件，以获得更完整的解析结果。' : '完成当前任务后，下一阶段将在流程中自动解锁。'}</p></div></aside></div></main></div>;
 }
 
 export default AIQuoteCreation;

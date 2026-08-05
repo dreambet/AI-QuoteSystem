@@ -1,88 +1,111 @@
-
 const db = require('../db');
 
+const jsonFields = new Set([
+  'blankSpec', 'finishedSpec', 'priceSnapshot', 'processSnapshot', 'calculation',
+  'aiReview', 'manualReview', 'drawingAnalysis', 'aiQuoteAnalysis'
+]);
+
+const quoteFields = new Set([
+  'customer', 'materialCode', 'partName', 'partNumber', 'partDescription', 'usageContext', 'material',
+  'length', 'width', 'height', 'diameter', 'grossWeight', 'netWeight', 'moq', 'quoteType', 'quantity',
+  'deliveryDate', 'precision', 'drawingPath', 'blankSpec', 'finishedSpec', 'strategyVersionId', 'priceSnapshot',
+  'processSnapshot', 'calculation', 'aiReview', 'manualReview', 'drawingAnalysis', 'aiQuoteAnalysis',
+  'finalUnitPrice', 'finalConfirmedBy', 'finalConfirmedAt', 'status'
+]);
+
+// Browser forms submit an empty input as "". SQLite accepted that value in a
+// numeric column, while MySQL in strict mode correctly rejects it. Keep all
+// optional numeric values nullable before they reach the database.
+const nullableNumericFields = new Set([
+  'length', 'width', 'height', 'diameter', 'grossWeight', 'netWeight', 'moq',
+  'strategyVersionId', 'finalUnitPrice'
+]);
+
+const normalizeOptionalNumber = value => {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'string' && value.trim() === '') return null;
+  return value;
+};
+
+const normalizeQuantity = value => {
+  if (value === null || value === undefined || (typeof value === 'string' && value.trim() === '')) return 1;
+  const numeric = Number(value);
+  return Number.isInteger(numeric) && numeric > 0 ? numeric : 1;
+};
+
+const normalizeFieldValue = (key, value) => {
+  if (key === 'quantity') return normalizeQuantity(value);
+  return nullableNumericFields.has(key) ? normalizeOptionalNumber(value) : value;
+};
+
+const serialize = (key, value) => jsonFields.has(key) && value !== null && value !== undefined ? JSON.stringify(value) : value;
+const sqlField = key => key === 'precision' ? '`precision`' : `\`${key}\``;
+
 class Quote {
-  static create(data) {
-    return new Promise((resolve, reject) => {
-      const id = Date.now().toString(36) + Math.random().toString(36).substr(2);
-      const now = new Date().toISOString();
-      const {
-        partName, partNumber, material, length, width, height, diameter,
-        quantity, deliveryDate, precision, drawingPath
-      } = data;
-
-      const stmt = db.prepare(`
-        INSERT INTO quotes (
-          id, partName, partNumber, material, length, width, height, diameter,
-          quantity, deliveryDate, precision, drawingPath, status, createdAt, updatedAt
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `);
-
-      stmt.run(
-        id, partName, partNumber || '', material, length || 0, width || 0, height || 0, diameter || 0,
-        quantity, deliveryDate || '', precision || '', drawingPath || '', 'draft', now, now,
-        function(err) {
-          if (err) reject(err);
-          else resolve({ id, ...data, status: 'draft', createdAt: now, updatedAt: now });
-        }
-      );
-    });
-  }
-
-  static findAll() {
-    return new Promise((resolve, reject) => {
-      db.all('SELECT * FROM quotes ORDER BY createdAt DESC', [], (err, rows) => {
-        if (err) reject(err);
-        else resolve(rows.map(row => Quote._parseRow(row)));
-      });
-    });
-  }
-
-  static findById(id) {
-    return new Promise((resolve, reject) => {
-      db.get('SELECT * FROM quotes WHERE id = ?', [id], (err, row) => {
-        if (err) reject(err);
-        else if (!row) resolve(null);
-        else resolve(Quote._parseRow(row));
-      });
-    });
-  }
-
-  static update(id, data) {
-    return new Promise((resolve, reject) => {
-      const now = new Date().toISOString();
-      const fields = [];
-      const values = [];
-
-      Object.keys(data).forEach(key => {
-        if (key !== 'id' && key !== 'createdAt') {
-          fields.push(`${key} = ?`);
-          values.push(typeof data[key] === 'object' ? JSON.stringify(data[key]) : data[key]);
-        }
-      });
-      fields.push('updatedAt = ?');
-      values.push(now);
-      values.push(id);
-
-      const stmt = db.prepare(`UPDATE quotes SET ${fields.join(', ')} WHERE id = ?`);
-      stmt.run(values, function(err) {
-        if (err) reject(err);
-        else resolve(Quote.findById(id));
-      });
-    });
-  }
-
-  static _parseRow(row) {
-    return {
-      ...row,
-      calculation: row.calculation ? JSON.parse(row.calculation) : null,
-      aiReview: row.aiReview ? JSON.parse(row.aiReview) : null,
-      manualReview: row.manualReview ? JSON.parse(row.manualReview) : null,
-      drawingAnalysis: row.drawingAnalysis ? JSON.parse(row.drawingAnalysis) : null,
-      aiQuoteAnalysis: row.aiQuoteAnalysis ? JSON.parse(row.aiQuoteAnalysis) : null
+  static async create(data) {
+    const id = Date.now().toString(36) + Math.random().toString(36).slice(2);
+    const stamp = new Date();
+    const fields = [
+      'id', 'customer', 'materialCode', 'partName', 'partNumber', 'partDescription', 'usageContext', 'material',
+      'length', 'width', 'height', 'diameter', 'grossWeight', 'netWeight', 'moq', 'quoteType', 'quantity',
+      'deliveryDate', 'precision', 'drawingPath', 'blankSpec', 'finishedSpec', 'strategyVersionId', 'priceSnapshot',
+      'processSnapshot', 'status', 'createdAt', 'updatedAt'
+    ];
+    const normalized = {
+      ...data,
+      materialCode: data.materialCode || data.partNumber || null,
+      partName: data.partName || '未命名零件',
+      material: data.material || '待确认材料',
+      quoteType: data.quoteType || 'production',
+      quantity: normalizeQuantity(data.quantity),
+      status: data.status || 'draft',
+      createdAt: stamp,
+      updatedAt: stamp
     };
+    await db.query(
+      `INSERT INTO quotes (${fields.map(sqlField).join(', ')}) VALUES (${fields.map(() => '?').join(', ')})`,
+      fields.map(field => field === 'id' ? id : serialize(field, normalizeFieldValue(field, normalized[field])))
+    );
+    return this.findById(id);
+  }
+
+  static async findAll() {
+    return db.query('SELECT * FROM quotes ORDER BY createdAt DESC');
+  }
+
+  // 多字段追溯搜索：materialCode / partName / partDescription / 通用 q
+  static async search(filters = {}) {
+    const conditions = [];
+    const params = [];
+    const { materialCode, partName, partDescription, q, status } = filters;
+    if (status) { conditions.push('status = ?'); params.push(status); }
+    if (materialCode) { conditions.push('materialCode LIKE ?'); params.push(`%${materialCode}%`); }
+    if (partName) { conditions.push('partName LIKE ?'); params.push(`%${partName}%`); }
+    if (partDescription) { conditions.push('partDescription LIKE ?'); params.push(`%${partDescription}%`); }
+    if (q) {
+      conditions.push('(materialCode LIKE ? OR partName LIKE ? OR partDescription LIKE ?)');
+      const like = `%${q}%`;
+      params.push(like, like, like);
+    }
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    return db.query(`SELECT * FROM quotes ${where} ORDER BY createdAt DESC`, params);
+  }
+
+  static async findById(id) {
+    const rows = await db.query('SELECT * FROM quotes WHERE id = ? LIMIT 1', [id]);
+    return rows[0] || null;
+  }
+
+  static async update(id, data) {
+    const fields = Object.keys(data).filter(key => quoteFields.has(key) && key !== 'createdAt' && data[key] !== undefined);
+    if (!fields.length) return this.findById(id);
+    const assignments = [...fields.map(field => `${sqlField(field)} = ?`), 'updatedAt = ?'];
+    await db.query(
+      `UPDATE quotes SET ${assignments.join(', ')} WHERE id = ?`,
+      [...fields.map(field => serialize(field, normalizeFieldValue(field, data[field]))), new Date(), id]
+    );
+    return this.findById(id);
   }
 }
 
 module.exports = Quote;
-

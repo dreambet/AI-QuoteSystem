@@ -2,27 +2,24 @@ import React, { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { quoteApi } from '../api/quotes';
 
-const statusText = { draft: '草稿', calculated: '已计算', ai_reviewed: 'AI 已审核', manually_reviewed: '人工已审核', finalized: '已完成' };
+const statusText = { draft: '草稿', calculated: '已计算', ai_reviewed: 'AI 已审核', ai_quoted: 'AI 已报价', manually_reviewed: '人工已审核', finalized: '已完成', rejected: '已驳回' };
 const cash = value => `¥${Number(value || 0).toFixed(2)}`;
 const drawingName = value => value ? String(value).split(/[\\/]/).pop() : '未关联图纸';
 const drawingType = value => { const name = drawingName(value); return name.includes('.') ? name.split('.').pop().toUpperCase() : 'CAD'; };
 
-function CalculationMethodPanel({ calculation, quantity }) {
-  const breakdown = calculation?.breakdown || {};
-  const volume = breakdown.volumeCalculation || {};
-  const material = breakdown.materialCalculation || {};
-  const process = breakdown.processBreakdown || {};
+function CalculationMethodPanel({ calculation, quantity, priceSnapshot }) {
+  const trace = calculation?.formulaTrace || {};
+  const processes = calculation?.processes || [];
+  const additions = calculation?.additions || [];
   const count = Number(quantity) || 1;
-  const perUnit = value => Number(value || 0) / count;
-  const directCost = perUnit(calculation.materialCost) + perUnit(calculation.laborCost) + perUnit(calculation.equipmentCost);
-  const methods = [
-    { index: '01', title: '体积与重量', formula: volume.formula || '未返回体积计算公式', detail: volume.dimensions || '未返回尺寸参数', result: `体积 ${Number(breakdown.volume || 0).toFixed(4)} cm³ · 重量 ${Number(breakdown.weight || 0).toFixed(3)} kg` },
-    { index: '02', title: '材料成本', formula: material.formula || '材料成本 = 重量 × 材料单价', detail: `密度 ${breakdown.density ?? '—'} g/cm³ · 单价 ${breakdown.materialPricePerKg ?? '—'} 元/kg`, result: `¥${perUnit(calculation.materialCost).toFixed(2)} / 件` },
-    { index: '03', title: '工序与工时', formula: '单道工时 = √体积 × 工序系数 × 精度系数 ÷ 10', detail: `精度系数 ${breakdown.precisionFactor ?? '—'}x · 总工时 ${process.summary?.totalTime ?? '—'} h`, result: `人工 ¥${perUnit(calculation.laborCost).toFixed(2)} / 件 · 设备 ¥${perUnit(calculation.equipmentCost).toFixed(2)} / 件` },
-    { index: '04', title: '管理费与利润', formula: '管理费 = 直接成本 × 15%；利润 =（直接成本 + 管理费）× 20%', detail: `直接成本 ¥${directCost.toFixed(2)} / 件`, result: `管理费 ¥${perUnit(calculation.overheadCost).toFixed(2)} · 利润 ¥${perUnit(calculation.profit).toFixed(2)} / 件` },
-    { index: '05', title: '报价汇总', formula: '单价 = 材料 + 人工 + 设备 + 管理费 + 利润；总价 = 单价 × 数量', detail: `数量 ${count} 件`, result: `单价 ¥${Number(calculation.unitPrice || 0).toFixed(2)} · 总价 ¥${Number(calculation.total || 0).toFixed(2)}` }
-  ];
-  return <section className="detail-card calculation-method-card"><div className="detail-section-title"><div><span className="eyebrow">CALCULATION METHOD</span><h2>报价计算方法</h2></div><b>按当前参数计算</b></div><p className="method-intro">以下为系统本次报价采用的计算路径；修改材料、尺寸、精度或数量后需重新计算。</p><div className="method-card-grid">{methods.map(method => <article className="method-card" key={method.index}><span className="method-index">{method.index}</span><div><h3>{method.title}</h3><code>{method.formula}</code><p>{method.detail}</p><strong>{method.result}</strong></div></article>)}</div>{material.details?.length > 0 && <div className="method-material-details"><span>材料计算依据</span>{material.details.map((item, index) => <p key={index}>{item}</p>)}</div>}{process.processes?.length > 0 && <div className="method-process-list"><div><span>工序成本拆分</span><small>工时与设备费按精度系数调整</small></div>{process.processes.map((item, index) => <p key={index}><b>{item.name}</b><span>{item.estimatedTime} h</span><span>人工 ¥{item.laborCost}</span><span>设备 ¥{item.equipmentCost}</span></p>)}</div>}</section>;
+  const traceRows = ['K', 'R', 'S', 'T', 'U', 'V', 'W'].filter(k => trace[k]);
+  return <section className="detail-card calculation-method-card"><div className="detail-section-title"><div><span className="eyebrow">CALCULATION METHOD</span><h2>报价计算方法</h2></div><b>按成本分析公式链</b></div><p className="method-intro">K=毛重×单价 -> R=Σ机加工 -> 附加 -> S/T/U/V/W；修改工序或单价后需重新计算。</p>
+    {priceSnapshot && <div className="method-material-details"><span>单价快照</span><p>单价 {priceSnapshot.unitPrice ?? '-'} 元/kg · 来源 {priceSnapshot.source || '-'} · {priceSnapshot.confirmedAt ? new Date(priceSnapshot.confirmedAt).toLocaleString('zh-CN') : '未确认'}{priceSnapshot.stale ? ' · 已过期/待确认' : ''}</p></div>}
+    {processes.length > 0 && <div className="method-process-list"><div><span>机加工工序明细</span><small>Q = 工费率/60 × 加工时长</small></div>{processes.map((item, index) => <p key={index}><b>{item.name}</b><span>{item.minutes} 分钟</span><span>@{item.hourlyRate}元/h</span><span>成本 ¥{Number(item.cost || 0).toFixed(2)}</span></p>)}</div>}
+    {additions.length > 0 && <div className="method-process-list"><div><span>附加费用明细</span><small>损耗/重量/固定</small></div>{additions.map((item, index) => <p key={index}><b>{item.name}</b><span>{item.formula}</span><span>¥{Number(item.cost || 0).toFixed(2)}</span></p>)}</div>}
+    <div className="calculation-breakdown">{traceRows.map(k => <div key={k}><span>{trace[k].label}</span><strong>{trace[k].expression}</strong></div>)}</div>
+    <div className="calculation-breakdown"><div><span>总价</span><strong>单价 {cash(calculation.unitPrice)} × {count} 件 + 调机费 {cash(calculation.setupFee)} = {cash(calculation.total)}</strong></div></div>
+  </section>;
 }
 
 function QuoteDetail() {
@@ -34,7 +31,13 @@ function QuoteDetail() {
   const [exportError, setExportError] = useState('');
 
   useEffect(() => { quoteApi.getById(id).then(response => setQuote(response.data)); }, [id]);
-  const calculate = async () => setQuote((await quoteApi.calculate(id)).data);
+  const calculate = async () => {
+    // 详情页重算：复用第3步已存的工序选择与单价快照
+    const ps = quote?.processSnapshot?.processSelection || [];
+    const snap = quote?.processSnapshot?.strategy || {};
+    const body = ps.length ? { processSelection: ps, unitPrice: quote?.priceSnapshot?.unitPrice, strategyId: snap.id, setupFee: snap.setupFee } : {};
+    setQuote((await quoteApi.calculate(id, body)).data);
+  };
   const aiReview = async () => setQuote((await quoteApi.aiReview(id)).data);
   const manualReview = async () => setQuote((await quoteApi.manualReview(id, reviewData)).data);
   const exportPdf = async () => {
@@ -57,7 +60,7 @@ function QuoteDetail() {
   const aiQuote = quote.aiQuoteAnalysis || {};
   const calc = quote.calculation;
   const features = analysis.features || [];
-  const costItems = calc ? [['材料成本', calc.materialCost], ['人工成本', calc.laborCost], ['设备费用', calc.equipmentCost], ['管理费用', calc.overheadCost], ['利润', calc.profit]] : [];
+  const costItems = calc ? [['材料成本 K', calc.materialCost], ['机加工成本 R', calc.machiningCost], ['管销 S', calc.overhead], ['小计 T', calc.subtotal], ['利润 U', calc.profit], ['含税 V', calc.taxIncluded], ['样品价 W', calc.samplePrice], ['调机费', calc.setupFee]] : [];
 
   return <div className="quote-detail-page">
     <header className="detail-hero">
@@ -67,7 +70,7 @@ function QuoteDetail() {
 
     <div className="detail-layout">
       <main className="detail-main-column">
-        <section className="detail-card overview-card"><div className="detail-section-title"><div><span className="eyebrow">PART OVERVIEW</span><h2>零件与图纸信息</h2></div><span className="drawing-type-chip">{drawingType(quote.drawingPath)}</span></div><div className="overview-grid"><div><span>材料</span><strong>{quote.material || '—'}</strong></div><div><span>数量</span><strong>{quote.quantity || 1} 件</strong></div><div><span>尺寸</span><strong>{quote.length || '—'} × {quote.width || '—'} × {quote.height || '—'} mm</strong></div><div><span>直径</span><strong>{quote.diameter ? `${quote.diameter} mm` : '—'}</strong></div><div className="overview-file"><span>关联图纸</span><strong>{drawingName(quote.drawingPath)}</strong></div></div></section>
+        <section className="detail-card overview-card"><div className="detail-section-title"><div><span className="eyebrow">PART OVERVIEW</span><h2>零件与图纸信息</h2></div><span className="drawing-type-chip">{drawingType(quote.drawingPath)}</span></div><div className="overview-grid"><div><span>物料编码</span><strong>{quote.materialCode || '-'}</strong></div><div><span>材料</span><strong>{quote.material || '—'}</strong></div><div><span>数量</span><strong>{quote.quantity || 1} 件</strong></div><div><span>毛重 / 净重</span><strong>{quote.grossWeight ?? '-'} / {quote.netWeight ?? '-'} kg</strong></div><div><span>尺寸</span><strong>{quote.length || '—'} × {quote.width || '—'} × {quote.height || '—'} mm</strong></div><div><span>直径</span><strong>{quote.diameter ? `${quote.diameter} mm` : '—'}</strong></div><div className="overview-file"><span>关联图纸</span><strong>{drawingName(quote.drawingPath)}</strong></div></div></section>
 
         <section className="detail-card analysis-detail-card"><div className="detail-section-title"><div><span className="eyebrow">AI DRAWING ANALYSIS</span><h2>图纸识别结果</h2></div><b>{features.length} 项特征</b></div><div className="analysis-detail-grid"><div className="feature-result-panel"><div className="feature-result-heading"><span>识别特征</span><small>滚动查看全部</small></div>{features.length ? <div className="detail-feature-scroll">{features.map((feature, index) => <div className="detail-feature-row" key={`${feature.type}-${index}`}><span>#{String(index + 1).padStart(2, '0')}</span><div><strong>{feature.type || 'CAD 特征'}</strong><small>{feature.description || '已从图纸几何信息中识别'}</small></div></div>)}</div> : <div className="detail-empty-inline">该任务尚未生成特征识别结果。</div>}</div><div className="analysis-meta-panel"><div><span>复杂程度</span><strong>{analysis.complexity || '待分析'}</strong></div><div><span>识别实体</span><strong>{analysis.cadInfo?.entityCount ?? '—'}</strong></div>{analysis.tolerances && <div><span>一般公差</span><strong>{analysis.tolerances.general || '—'}</strong></div>}<div className="analysis-note"><span>分析备注</span><p>{analysis.notes || '暂无额外图纸分析备注。'}</p></div></div></div></section>
 
@@ -75,7 +78,7 @@ function QuoteDetail() {
       </main>
 
       <aside className="detail-side-column">
-        <section className="detail-card price-detail-card"><div className="detail-section-title"><div><span className="eyebrow">PRICE SUMMARY</span><h2>报价明细</h2></div>{calc && <button type="button" className="detail-ghost-button" onClick={() => setShowBreakdown(value => !value)}>{showBreakdown ? '收起计算方法' : '查看计算方法'}</button>}</div>{calc ? <><div className="detail-cost-list">{costItems.map(([label, value]) => <div key={label}><span>{label}</span><strong>{cash(value)}</strong></div>)}</div><div className="detail-total"><span>参考总价</span><strong>{cash(calc.total)}</strong><small>单价 {cash(calc.unitPrice)}</small></div>{showBreakdown && <CalculationMethodPanel calculation={calc} quantity={quote.quantity} />}</> : <div className="detail-empty-inline"><p>尚未计算报价。</p><button type="button" className="primary-action" onClick={calculate}>计算报价</button></div>}</section>
+        <section className="detail-card price-detail-card"><div className="detail-section-title"><div><span className="eyebrow">PRICE SUMMARY</span><h2>报价明细</h2></div>{calc && <button type="button" className="detail-ghost-button" onClick={() => setShowBreakdown(value => !value)}>{showBreakdown ? '收起计算方法' : '查看计算方法'}</button>}</div>{calc ? <><div className="detail-cost-list">{costItems.map(([label, value]) => <div key={label}><span>{label}</span><strong>{cash(value)}</strong></div>)}</div><div className="detail-total"><span>参考总价</span><strong>{cash(calc.total)}</strong><small>单价 {cash(calc.unitPrice)}</small></div>{showBreakdown && <CalculationMethodPanel calculation={calc} quantity={quote.quantity} priceSnapshot={quote.priceSnapshot} />}</> : <div className="detail-empty-inline"><p>尚未计算报价。</p><button type="button" className="primary-action" onClick={calculate}>计算报价</button></div>}</section>
 
         <section className="detail-card review-detail-card"><div className="detail-section-title"><div><span className="eyebrow">REVIEW WORKFLOW</span><h2>审核与交付</h2></div></div>{quote.aiReview ? <div className="review-result"><span>AI 审核：{quote.aiReview.status}</span><ul>{(quote.aiReview.comments || []).map((item, index) => <li key={index}>{item}</li>)}</ul>{quote.aiReview.suggestions?.length > 0 && <ul>{quote.aiReview.suggestions.map((item, index) => <li key={index}>{item}</li>)}</ul>}</div> : calc ? <button type="button" className="secondary-action full-action" onClick={aiReview}>执行 AI 审核</button> : <p className="detail-muted">完成报价计算后可进行 AI 审核。</p>}{quote.aiReview && !quote.manualReview && <div className="manual-review-form"><label>审核结论<select value={reviewData.status} onChange={event => setReviewData(data => ({ ...data, status: event.target.value }))}><option value="approved">通过</option><option value="rejected">拒绝</option><option value="needs_modification">需修改</option></select></label><label>审核意见<textarea value={reviewData.comments} onChange={event => setReviewData(data => ({ ...data, comments: event.target.value }))} placeholder="填写人工审核意见" /></label><button type="button" className="primary-action full-action" onClick={manualReview}>提交人工审核</button></div>}{quote.manualReview && <div className="manual-review-complete"><span>人工审核：{quote.manualReview.status}</span><p>{quote.manualReview.comments || '未填写额外意见'}</p></div>}{quote.manualReview?.status === 'approved' && <button type="button" className="export-button full-action" disabled={exporting} onClick={exportPdf}>{exporting ? '正在生成 PDF…' : '导出报价单 PDF'}</button>}{exportError && <p className="export-error">{exportError}</p>}</section>
       </aside>

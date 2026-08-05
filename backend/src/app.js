@@ -5,6 +5,7 @@ const cors = require('cors');
 const quotesRouter = require('./routes/quotes');
 const uploadRouter = require('./routes/upload');
 const assistantRouter = require('./routes/assistant');
+const catalogRouter = require('./routes/catalog');
 
 const app = express();
 
@@ -22,6 +23,7 @@ app.get('/health', (req, res) => {
 app.use('/api/quotes', quotesRouter);
 app.use('/api/upload', uploadRouter);
 app.use('/api/assistant', assistantRouter);
+app.use('/api/catalog', catalogRouter);
 
 // Express 全局错误处理中间件 — 兜底捕获路由中未处理的异常
 app.use((err, req, res, next) => {

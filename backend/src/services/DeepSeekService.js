@@ -1,6 +1,7 @@
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
+const db = require('../db');
 
 class DeepSeekService {
   constructor() {
@@ -175,22 +176,28 @@ ${JSON.stringify(quoteData, null, 2)}`
     }
   }
 
-  fallbackQuoteAnalysis(quoteData) {
+  async fallbackQuoteAnalysis(quoteData) {
+    // 从工序目录取前几道机加工工序作为建议（替代旧硬编码 下料/粗加工/精加工）
+    let processSuggestions = [
+      { process: '车床', reason: '基础机加工工序' },
+      { process: 'CNC（三轴）', reason: '型面加工' },
+      { process: '铣床', reason: '补充加工' }
+    ];
+    try {
+      const rows = await db.query("SELECT name FROM processes WHERE costType = 'time' AND active = 1 ORDER BY id LIMIT 3");
+      if (rows.length) processSuggestions = rows.map(p => ({ process: p.name, reason: '机加工工序' }));
+    } catch (_) { /* 保持默认 */ }
+
     return {
       materialRecommendation: '建议使用标准材料',
-      processSuggestions: [
-        { process: '下料', reason: '准备毛坯', estimatedTime: '0.5' },
-        { process: '粗加工', reason: '去除大部分余量', estimatedTime: '2.0' },
-        { process: '精加工', reason: '保证精度要求', estimatedTime: '1.5' }
-      ],
+      processSuggestions,
       priceAnalysis: {
-        materialCost: '根据重量计算',
-        laborCost: '根据工序计算',
-        equipmentCost: '根据设备使用计算',
-        totalEstimation: '基于现有计算引擎'
+        materialCost: '毛重 × 单价',
+        machiningCost: 'Σ 工费率/60 × 加工时长',
+        totalEstimation: '基于现有计算引擎（K/R/S/T/U/V/W）'
       },
-      warningPoints: ['建议进行人工审核'],
-      suggestions: ['建议上传更清晰的图纸']
+      warningPoints: ['建议进行人工审核', '请确认材料单价为最新市场价'],
+      suggestions: ['建议上传更清晰的图纸', '在工序确认面板核对加工时长']
     };
   }
 
