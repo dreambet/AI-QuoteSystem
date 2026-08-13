@@ -77,8 +77,10 @@ W = V × 样品倍率                     // 样品价格（产品5倍率=1，W=
 `draft` -> `calculated` -> `ai_reviewed` -> `manually_reviewed` -> `finalized`；AI 报价路径 `ai_quoted`；`rejected`。每个端点写回对应 JSON 并推进 status。
 
 ### CAD 解析链（`CADParserService.js`）
-- DXF：`dxf-parser`；DWG：`dwgdxf`(WASM) 进程内转 DXF（构造函数显式设 `wasmBase`，Windows 默认路径失效）；STEP：`occt-import-js` 读三角网格，缓存 `uploads/models/{quoteId}.json`。
+- DXF：`dxf-parser`；DWG：`dwgdxf`(WASM) 进程内转 DXF（构造函数显式设 `wasmBase`，Windows 默认路径失效）；STEP：`occt-import-js` 读三角网格，缓存 `uploads/models/{quoteId}.json`。三库均已是最新版且 license 可用（MIT/MIT/LGPL-2.1），无需换库。
 - 2D 图纸产出参数化模型规格，前端 three.js 拉伸成 3D。AI 提取的尺寸（length/width/height/diameter）在第3步预填到 blankSpec/finishedSpec，**不直接参与成本计算**（成本主输入是毛重/净重/单价/工序）。
+- **尺寸标注/公差提取**：`_extractDimensions` 从 DIMENSION 实体提取类型(线性/对齐/角度/直径/半径/坐标)、实测值(actualMeasurement)、文本、位置、角度；公差优先从文本(`\S上^下;`/`±x`)解析，回退到 DIMSTYLE 全局变量(`$DIMTP`/`$DIMTM`/`$DIMTOL`)。结果经 `analyze-drawing` 写入 `analysisResult.dimensionAnnotations` + `globalTolerance`，并用于 `dimensions` 预填(直径/线性标注覆盖 bounds 估算)。
+- **性能注意**：文件读取用 `fs.promises`(异步，勿用同步阻塞事件循环)；bounds 极值用单遍循环(勿用 `Math.min(...spread)`，大模型会栈溢出)；STEP 网格密度可由 env `STEP_LINEAR_DEFLECTION`(默认 0.005)/`STEP_ANGULAR_DEFLECTION`(默认 0.5) 调节，值越大三角面越少、解析与渲染越快。
 
 ### 前端
 AI 流程（`/quotes/ai-new` -> `AIQuoteCreation.jsx`）5 步：

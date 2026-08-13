@@ -136,7 +136,6 @@ async function ensureSchema() {
         code VARCHAR(128) NOT NULL UNIQUE,
         name VARCHAR(255) NOT NULL,
         specification VARCHAR(255) NULL,
-        density DECIMAL(12,6) NULL,
         priceUnit VARCHAR(32) NOT NULL DEFAULT 'kg',
         active TINYINT(1) NOT NULL DEFAULT 1,
         createdBy VARCHAR(128) NULL,

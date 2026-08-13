@@ -42,12 +42,51 @@ const isStale = confirmedAt => !confirmedAt || (Date.now() - new Date(confirmedA
 async function lookupMaterialPrice(material) {
   if (!material) return null;
   const rows = await db.query(
-    `SELECT mp.unitPrice, mp.confirmedAt, mp.effectiveAt, m.id AS materialId, m.code, m.density
+    `SELECT mp.unitPrice, mp.confirmedAt, mp.effectiveAt, m.id AS materialId, m.code
      FROM materials m LEFT JOIN material_prices mp ON mp.materialId = m.id AND mp.status = 'active'
      WHERE m.code = ? OR m.name = ? LIMIT 1`,
     [material, material]
   );
   return rows[0] || null;
+}
+
+// 把第 3 步确认的材料单价回写到共享目录 material_prices：
+// 同一材质旧的 active 转 historical，新价插入为新 active（带 confirmedAt=now，视为市场确认）。
+// 价格与当前 active 一致时跳过，避免重复写历史。材质不存在于 materials 时跳过（防御）。
+async function upsertMaterialPrice(materialCode, unitPrice, operator = 'manual-quote') {
+  if (!materialCode || unitPrice == null || Number.isNaN(Number(unitPrice))) return null;
+  const conn = await db.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [mats] = await conn.query('SELECT id FROM materials WHERE code = ? LIMIT 1', [materialCode]);
+    if (!mats.length) { await conn.rollback(); return null; }
+    const materialId = mats[0].id;
+    const [active] = await conn.query(
+      "SELECT id, unitPrice FROM material_prices WHERE materialId = ? AND status = 'active' LIMIT 1",
+      [materialId]
+    );
+    if (active.length && Number(active[0].unitPrice) === Number(unitPrice)) {
+      await conn.commit();
+      return { materialId, changed: false };
+    }
+    if (active.length) {
+      await conn.query("UPDATE material_prices SET status = 'historical' WHERE id = ?", [active[0].id]);
+    }
+    const now = new Date();
+    await conn.query(
+      `INSERT INTO material_prices
+        (materialId, unitPrice, currency, taxIncluded, effectiveAt, confirmedAt, source, status, operatorName, changeReason, createdAt)
+       VALUES (?, ?, 'CNY', 0, ?, ?, 'manual', 'active', ?, ?, ?)`,
+      [materialId, Number(unitPrice), now, now, operator, '报价流程确认单价', now]
+    );
+    await conn.commit();
+    return { materialId, changed: true };
+  } catch (error) {
+    await conn.rollback();
+    throw error;
+  } finally {
+    conn.release();
+  }
 }
 
 // 解析报价策略：优先 strategyVersionId，其次取一条 published，再合并用户覆盖
@@ -181,6 +220,13 @@ router.post('/:id/calculate', async (req, res) => {
     const strategy = await resolveStrategy(quote.strategyVersionId, { ...strategyOverrides, strategyId: strategyOverrides.strategyId || strategyId });
     const selection = await enrichSelection(processSelection);
     const fee = setupFee != null ? num(setupFee) : num(strategy.setupFeeDefault, 0);
+
+    // 用户第3步手填单价 -> 回写共享目录 material_prices（旧 active 转 historical，新价升为 active）。
+    // 失败不阻断计算，仅告警。
+    if (priceSource === 'manual') {
+      try { await upsertMaterialPrice(quote.material, price); }
+      catch (err) { console.warn('回写 material_prices 失败:', err.message); }
+    }
 
     const calculation = QuoteCalculator.calculate(
       { grossWeight, netWeight, quantity: quote.quantity },
@@ -349,6 +395,21 @@ router.post('/:id/analyze-drawing', uploadDrawing.single('drawing'), async (req,
           }
         }
 
+        // 尺寸标注优先：用 DIMENSION 实体的实测值覆盖 bounds 估算值，更贴近图纸标注
+        const dimAnn = parseResult.dimensionAnnotations || [];
+        if (dimAnn.length) {
+          const dia = dimAnn.find(d => d.type === '直径' && d.value != null);
+          const rad = dimAnn.find(d => d.type === '半径' && d.value != null);
+          if (dia) dimensions.diameter = dia.value;
+          else if (rad) dimensions.diameter = rad.value * 2;
+          const linears = dimAnn
+            .filter(d => (d.type === '线性' || d.type === '对齐') && d.value != null)
+            .map(d => d.value)
+            .sort((a, b) => b - a);
+          if (linears.length) dimensions.length = linears[0];
+          if (linears.length > 1) dimensions.width = linears[1];
+        }
+
         let modelInfo = parseResult.modelInfo || { type: 'none', available: false };
         const modelCachePath = path.join(modelsDir, `${quote.id}.json`);
         if (parseResult.model?.meshes?.length) {
@@ -366,6 +427,8 @@ router.post('/:id/analyze-drawing', uploadDrawing.single('drawing'), async (req,
           quantity: quote.quantity || 1,
           precision: quote.precision || '中等',
           features: parseResult.features || [],
+          dimensionAnnotations: dimAnn,
+          globalTolerance: parseResult.globalTolerance || null,
           complexity: '中等',
           notes: parseResult.message || 'CAD文件已解析，请手动确认参数',
           modelInfo,

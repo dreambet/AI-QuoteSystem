@@ -22,6 +22,7 @@ export const quoteApi = {
 
 export const catalogApi = {
   getMaterials: () => axios.get(`${CATALOG_BASE}/materials`),
+  createMaterial: (data) => axios.post(`${CATALOG_BASE}/materials`, data),
   getMaterialPrices: (id) => axios.get(`${CATALOG_BASE}/materials/${id}/prices`),
   confirmPrice: (id, data) => axios.post(`${CATALOG_BASE}/materials/${id}/prices`, data),
   getProcesses: () => axios.get(`${CATALOG_BASE}/processes`),

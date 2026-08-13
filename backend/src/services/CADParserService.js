@@ -1,4 +1,5 @@
 const fs = require('fs');
+const fsp = fs.promises;
 const path = require('path');
 const { pathToFileURL } = require('url');
 const DxfParser = require('dxf-parser');
@@ -14,6 +15,11 @@ const DWG_VERSIONS = {
   AC1032: 'AutoCAD 2018/2019/2020/2021/2022/2023/2024'
 };
 
+// DXF DIMENSION 实体 dimensionType(组码70) 低 3 位表示类型
+const DIMENSION_TYPE_MAP = {
+  0: '线性', 1: '对齐', 2: '角度', 3: '直径', 4: '半径', 5: '角度(三点)', 6: '坐标'
+};
+
 class CADParserService {
   constructor() {
     this.dwgConverterPromise = null;
@@ -24,7 +30,7 @@ class CADParserService {
 
   async parseDXF(filePath) {
     try {
-      const content = fs.readFileSync(filePath, 'utf8');
+      const content = await fsp.readFile(filePath, 'utf8');
       return this._parseDXFContent(content);
     } catch (error) {
       console.error('DXF解析失败:', error);
@@ -39,9 +45,12 @@ class CADParserService {
     const parser = new DxfParser();
     const dxf = parser.parseSync(content);
     const entities = dxf.entities || [];
+    const header = dxf.header || {};
     const entitySummary = this._summarizeEntities(entities);
     const model = this._extractDxf3DModel(entities);
     const bounds = model ? this._calculateDxf3DBounds(model) : this._calculateBounds(entities);
+    const dimensionAnnotations = this._extractDimensions(entities, header);
+    const globalTolerance = this._extractGlobalTolerance(header);
 
     return {
       success: true,
@@ -51,6 +60,8 @@ class CADParserService {
       entitySummary,
       bounds,
       features: entitySummary.features,
+      dimensionAnnotations,
+      globalTolerance,
       ...(model ? { model } : {}),
       // 以实体数据而非文件扩展名判断维度：仅有二维图元时保留其原始平面；检测到三维面或 Z 坐标路径时才进入三维渲染。
       modelInfo: model
@@ -62,12 +73,15 @@ class CADParserService {
   async parseSTEP(filePath) {
     try {
       const occt = await this._getOCCT();
-      const stepBytes = new Uint8Array(fs.readFileSync(filePath));
+      const stepBytes = new Uint8Array(await fsp.readFile(filePath));
+      // 网格密度可配置：默认 0.005(包围盒 0.5%)，比 0.001 减面约 5x，预览足够；大件可经 env 调大
+      const linearDeflection = Number(process.env.STEP_LINEAR_DEFLECTION) || 0.005;
+      const angularDeflection = Number(process.env.STEP_ANGULAR_DEFLECTION) || 0.5;
       const imported = occt.ReadStepFile(stepBytes, {
         linearUnit: 'millimeter',
         linearDeflectionType: 'bounding_box_ratio',
-        linearDeflection: 0.001,
-        angularDeflection: 0.5
+        linearDeflection,
+        angularDeflection
       });
 
       if (!imported?.success || !imported.meshes?.length) {
@@ -90,6 +104,7 @@ class CADParserService {
         bounds: this._calculateMeshBounds(meshes),
         entityCount: features.length,
         features,
+        dimensionAnnotations: [],
         model: { meshes },
         modelInfo: { type: 'mesh', source: 'step', label: '原始三维模型', available: true }
       };
@@ -97,7 +112,7 @@ class CADParserService {
       console.error('STEP解析失败:', error);
       return {
         success: false,
-        error: 'STEP解析失败'
+        error: `STEP解析失败: ${error.message || error}`
       };
     }
   }
@@ -107,14 +122,14 @@ class CADParserService {
    * 不需要在服务器上另行安装 ODA 或 AutoCAD。
    */
   async parseDWG(filePath) {
-    const version = this._getDWGVersion(filePath);
+    const version = await this._getDWGVersion(filePath);
     if (!version) {
       return { success: false, error: '文件不是有效的 DWG 文件（未找到 AC10xx 文件头）' };
     }
 
     try {
       const converter = await this._getDWGConverter();
-      const dwgBytes = new Uint8Array(fs.readFileSync(filePath));
+      const dwgBytes = new Uint8Array(await fsp.readFile(filePath));
       const dxfBytes = await converter.convertDwgToDxf(dwgBytes);
       const result = this._parseDXFContent(Buffer.from(dxfBytes).toString('utf8'));
 
@@ -228,33 +243,35 @@ class CADParserService {
   }
 
   _calculateMeshBounds(meshes) {
-    const coords = meshes.flatMap(mesh => mesh.positions);
-    if (!coords.length) return null;
-    const xs = [], ys = [], zs = [];
-    for (let i = 0; i < coords.length; i += 3) {
-      xs.push(coords[i]);
-      ys.push(coords[i + 1]);
-      zs.push(coords[i + 2]);
+    let minX = Infinity, minY = Infinity, minZ = Infinity, maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+    let has = false;
+    for (const mesh of meshes) {
+      const p = mesh.positions;
+      if (!p || !p.length) continue;
+      has = true;
+      for (let i = 0; i < p.length; i += 3) {
+        const x = p[i], y = p[i + 1], z = p[i + 2];
+        if (x < minX) minX = x; if (x > maxX) maxX = x;
+        if (y < minY) minY = y; if (y > maxY) maxY = y;
+        if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+      }
     }
+    if (!has) return null;
     return {
-      minX: Math.min(...xs), maxX: Math.max(...xs),
-      minY: Math.min(...ys), maxY: Math.max(...ys),
-      minZ: Math.min(...zs), maxZ: Math.max(...zs),
-      width: Math.max(...xs) - Math.min(...xs),
-      height: Math.max(...ys) - Math.min(...ys),
-      depth: Math.max(...zs) - Math.min(...zs)
+      minX, maxX, minY, maxY, minZ, maxZ,
+      width: maxX - minX, height: maxY - minY, depth: maxZ - minZ
     };
   }
 
-  _getDWGVersion(filePath) {
+  async _getDWGVersion(filePath) {
     const buffer = Buffer.alloc(6);
-    const fd = fs.openSync(filePath, 'r');
+    const fh = await fsp.open(filePath, 'r');
     try {
-      fs.readSync(fd, buffer, 0, 6, 0);
+      await fh.read(buffer, 0, 6, 0);
       const signature = buffer.toString('ascii');
       return signature.startsWith('AC10') ? signature : null;
     } finally {
-      fs.closeSync(fd);
+      await fh.close();
     }
   }
 
@@ -313,25 +330,70 @@ class CADParserService {
   }
 
   _calculateDxf3DBounds(model) {
-    const positions = [
-      ...(model.meshes || []).flatMap(mesh => mesh.positions || []),
-      ...(model.linePaths || []).flatMap(path => path.points || [])
-    ];
-    if (!positions.length) return null;
-    const xs = [], ys = [], zs = [];
-    for (let index = 0; index < positions.length; index += 3) {
-      xs.push(positions[index]);
-      ys.push(positions[index + 1]);
-      zs.push(positions[index + 2]);
-    }
-    return {
-      minX: Math.min(...xs), maxX: Math.max(...xs),
-      minY: Math.min(...ys), maxY: Math.max(...ys),
-      minZ: Math.min(...zs), maxZ: Math.max(...zs),
-      width: Math.max(...xs) - Math.min(...xs),
-      height: Math.max(...ys) - Math.min(...ys),
-      depth: Math.max(...zs) - Math.min(...zs)
+    let minX = Infinity, minY = Infinity, minZ = Infinity, maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+    let has = false;
+    const consume = p => {
+      if (!p || !p.length) return;
+      for (let i = 0; i < p.length; i += 3) {
+        const x = p[i], y = p[i + 1], z = p[i + 2];
+        if (x < minX) minX = x; if (x > maxX) maxX = x;
+        if (y < minY) minY = y; if (y > maxY) maxY = y;
+        if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+        has = true;
+      }
     };
+    (model.meshes || []).forEach(mesh => consume(mesh.positions));
+    (model.linePaths || []).forEach(path => consume(path.points));
+    if (!has) return null;
+    return {
+      minX, maxX, minY, maxY, minZ, maxZ,
+      width: maxX - minX, height: maxY - minY, depth: maxZ - minZ
+    };
+  }
+
+  _extractDimensions(entities, header) {
+    const dims = [];
+    const globalTol = this._extractGlobalTolerance(header);
+    (entities || []).forEach(entity => {
+      if (entity.type !== 'DIMENSION') return;
+      const typeCode = entity.dimensionType != null ? (entity.dimensionType & 7) : 0;
+      const typeLabel = DIMENSION_TYPE_MAP[typeCode] || '未知';
+      const value = entity.actualMeasurement != null ? Number(entity.actualMeasurement) : null;
+      const tolerance = this._parseDimensionTolerance(entity.text)
+        || (globalTol ? { upper: globalTol.upper, lower: globalTol.lower, source: 'dimstyle' } : null);
+      dims.push({
+        type: typeLabel,
+        typeCode,
+        value,
+        text: entity.text || '',
+        tolerance,
+        position: entity.middleOfText || entity.anchorPoint || null,
+        angle: entity.angle || 0,
+        block: entity.block || ''
+      });
+    });
+    return dims;
+  }
+
+  _extractGlobalTolerance(header) {
+    if (!header) return null;
+    const dimtol = header.$DIMTOL;
+    if (dimtol == null || Number(dimtol) === 0) return null;
+    const upper = header.$DIMTP != null ? Number(header.$DIMTP) : null;
+    const lower = header.$DIMTM != null ? Number(header.$DIMTM) : null;
+    if (upper == null && lower == null) return null;
+    return { upper, lower };
+  }
+
+  _parseDimensionTolerance(text) {
+    if (!text) return null;
+    // MTEXT 堆叠公差: \S<上>^<下>;
+    const m = text.match(/\\S([^\^;]+)\^([^;]+);/);
+    if (m) return { upper: m[1].trim(), lower: m[2].trim(), source: 'text' };
+    // ±数值 形式
+    const pm = text.match(/±\s*([-\d.]+)/);
+    if (pm) return { upper: pm[1], lower: `-${pm[1]}`, source: 'text' };
+    return null;
   }
 
   _summarizeEntities(entities) {
@@ -537,16 +599,15 @@ class CADParserService {
       return null;
     }
 
-    const xs = coords.map(p => p.x);
-    const ys = coords.map(p => p.y);
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const p of coords) {
+      if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
+      if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
+    }
 
     return {
-      minX: Math.min(...xs),
-      minY: Math.min(...ys),
-      maxX: Math.max(...xs),
-      maxY: Math.max(...ys),
-      width: Math.max(...xs) - Math.min(...xs),
-      height: Math.max(...ys) - Math.min(...ys)
+      minX, minY, maxX, maxY,
+      width: maxX - minX, height: maxY - minY
     };
   }
 

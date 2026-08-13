@@ -65,6 +65,31 @@ async function ensureGradeMaterialPrices(connection) {
   return results.join('；');
 }
 
+// 报价策略改名：英维克xxxx成本策略 -> 成本策略A/B/C/...（按 id 顺序），与前端下拉显示一致
+async function renameStrategies(connection) {
+  const [rows] = await connection.query('SELECT id, name FROM pricing_strategies ORDER BY id');
+  if (!rows.length) return '无策略';
+  let renamed = 0;
+  for (let i = 0; i < rows.length; i++) {
+    const letter = String.fromCharCode(65 + i);
+    const target = `成本策略${letter}`;
+    if (rows[i].name === target) continue;
+    await connection.query('UPDATE pricing_strategies SET name = ?, updatedAt = ? WHERE id = ?', [target, NOW, rows[i].id]);
+    renamed += 1;
+  }
+  return `重命名 ${renamed} 条策略为 成本策略A..${String.fromCharCode(65 + rows.length - 1)}（共${rows.length}条）`;
+}
+
+// 移除 materials.density 列（业务不再使用密度参数）
+async function dropDensityColumn(connection) {
+  const [cols] = await connection.query(
+    `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'materials' AND COLUMN_NAME = 'density'`
+  );
+  if (!cols.length) return 'materials.density 已不存在，跳过';
+  await connection.query('ALTER TABLE materials DROP COLUMN density');
+  return 'materials.density 列已删除';
+}
+
 async function main() {
   await db.ensureSchema();
   const connection = await db.getConnection();
@@ -74,6 +99,8 @@ async function main() {
     console.log('1)', await fixStrategySampleMultiplier(connection));
     console.log('2)', await fixAnodizingUnitRate(connection));
     console.log('3)', await ensureGradeMaterialPrices(connection));
+    console.log('4)', await renameStrategies(connection));
+    console.log('5)', await dropDensityColumn(connection));
     console.log('== 完成 ==');
   } finally {
     connection.release();

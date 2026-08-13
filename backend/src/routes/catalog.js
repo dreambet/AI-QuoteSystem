@@ -16,7 +16,7 @@ const operator = req => (req.body && req.body.operatorName) || (req.query && req
 router.get('/materials', async (req, res) => {
   try {
     const rows = await db.query(`
-      SELECT m.id, m.code, m.name, m.specification, m.density, m.priceUnit, m.active,
+      SELECT m.id, m.code, m.name, m.specification, m.priceUnit, m.active,
              mp.unitPrice, mp.effectiveAt AS priceEffectiveAt, mp.confirmedAt AS priceConfirmedAt,
              mp.source AS priceSource, mp.changeReason AS priceChangeReason
       FROM materials m
@@ -32,6 +32,39 @@ router.get('/materials', async (req, res) => {
     res.json(list);
   } catch (error) {
     res.status(500).json({ error: error.message });
+  }
+});
+
+// 新增材质（用户在下拉里没有时手输并保存，供下次复用）。可选带单价。
+router.post('/materials', async (req, res) => {
+  const { code, name, unitPrice, changeReason } = req.body || {};
+  if (!code || !String(code).trim()) return res.status(400).json({ error: '材质编码(code)必填' });
+  const trimCode = String(code).trim();
+  const conn = await db.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [exist] = await conn.query('SELECT id FROM materials WHERE code = ?', [trimCode]);
+    if (exist.length) { await conn.rollback(); return res.status(409).json({ error: '该材质编码已存在' }); }
+    const now = new Date();
+    const [result] = await conn.query(
+      'INSERT INTO materials (code, name, specification, priceUnit, active, createdBy, createdAt, updatedAt) VALUES (?, ?, NULL, ?, 1, ?, ?, ?)',
+      [trimCode, (name || trimCode), 'kg', operator(req), now, now]
+    );
+    const materialId = result.insertId;
+    if (unitPrice != null && unitPrice !== '') {
+      await conn.query(
+        `INSERT INTO material_prices (materialId, unitPrice, currency, taxIncluded, effectiveAt, confirmedAt, source, status, operatorName, changeReason, createdAt)
+         VALUES (?, ?, 'CNY', 0, ?, ?, 'manual', 'active', ?, ?, ?)`,
+        [materialId, Number(unitPrice), now, now, operator(req), changeReason || '新增材质', now]
+      );
+    }
+    await conn.commit();
+    res.status(201).json({ id: materialId, code: trimCode, name: name || trimCode });
+  } catch (error) {
+    await conn.rollback();
+    res.status(500).json({ error: error.message });
+  } finally {
+    conn.release();
   }
 });
 
