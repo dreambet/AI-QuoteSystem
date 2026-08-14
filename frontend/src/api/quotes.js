@@ -28,9 +28,9 @@ export const catalogApi = {
   getProcesses: () => axios.get(`${CATALOG_BASE}/processes`),
   updateProcess: (id, data) => axios.put(`${CATALOG_BASE}/processes/${id}`, data),
   getStrategies: () => axios.get(`${CATALOG_BASE}/strategies`),
+  createStrategy: (data) => axios.post(`${CATALOG_BASE}/strategies`, data),
   updateStrategy: (id, data) => axios.put(`${CATALOG_BASE}/strategies/${id}`, data),
-  getPartMasters: () => axios.get(`${CATALOG_BASE}/part-masters`),
-  getPartMaster: (materialCode) => axios.get(`${CATALOG_BASE}/part-masters/${materialCode}`)
+  deleteStrategy: (id) => axios.delete(`${CATALOG_BASE}/strategies/${id}`)
 };
 
 export const uploadApi = {

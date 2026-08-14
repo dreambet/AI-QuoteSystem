@@ -110,10 +110,8 @@ class QuoteGenerator {
         this.addSectionTitle(doc, '基本信息');
         this.addKeyValue(doc, '零件名称：', quote.partName);
         this.addKeyValue(doc, '物料编码：', quote.materialCode);
-        this.addKeyValue(doc, '零件编号：', quote.partNumber);
         this.addKeyValue(doc, '材料：', quote.material);
         this.addKeyValue(doc, '数量：', quote.quantity);
-        this.addKeyValue(doc, '精度等级：', quote.precision);
         this.addKeyValue(doc, '毛重(kg)：', quote.grossWeight);
         this.addKeyValue(doc, '净重(kg)：', quote.netWeight);
 

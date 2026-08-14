@@ -17,7 +17,7 @@ const pool = mysql.createPool(databaseConfig);
 
 const jsonColumns = [
   'calculation', 'aiReview', 'manualReview', 'drawingAnalysis', 'aiQuoteAnalysis',
-  'blankSpec', 'finishedSpec', 'priceSnapshot', 'processSnapshot', 'payload', 'processRoute', 'config'
+  'blankSpec', 'finishedSpec', 'priceSnapshot', 'processSnapshot'
 ];
 
 function parseRow(row) {
@@ -78,24 +78,13 @@ async function ensureSchema() {
     await connection.query(`
       CREATE TABLE IF NOT EXISTS quotes (
         id VARCHAR(64) PRIMARY KEY,
-        customer VARCHAR(255) NULL,
         materialCode VARCHAR(128) NULL,
         partName VARCHAR(255) NOT NULL,
-        partNumber VARCHAR(255) NULL,
         partDescription TEXT NULL,
-        usageContext VARCHAR(255) NULL,
         material VARCHAR(128) NOT NULL,
-        length DECIMAL(16,4) NULL,
-        width DECIMAL(16,4) NULL,
-        height DECIMAL(16,4) NULL,
-        diameter DECIMAL(16,4) NULL,
         grossWeight DECIMAL(16,6) NULL,
         netWeight DECIMAL(16,6) NULL,
-        moq INT NULL,
-        quoteType VARCHAR(32) NOT NULL DEFAULT 'production',
         quantity INT NOT NULL,
-        deliveryDate VARCHAR(64) NULL,
-        \`precision\` VARCHAR(64) NULL,
         drawingPath TEXT NULL,
         blankSpec LONGTEXT NULL,
         finishedSpec LONGTEXT NULL,
@@ -108,8 +97,6 @@ async function ensureSchema() {
         drawingAnalysis LONGTEXT NULL,
         aiQuoteAnalysis LONGTEXT NULL,
         finalUnitPrice DECIMAL(16,4) NULL,
-        finalConfirmedBy VARCHAR(128) NULL,
-        finalConfirmedAt DATETIME NULL,
         status VARCHAR(64) NOT NULL DEFAULT 'draft',
         createdAt DATETIME NOT NULL,
         updatedAt DATETIME NOT NULL,
@@ -119,12 +106,10 @@ async function ensureSchema() {
     `);
 
     const quoteColumns = {
-      customer: 'VARCHAR(255) NULL', materialCode: 'VARCHAR(128) NULL', partDescription: 'TEXT NULL',
-      usageContext: 'VARCHAR(255) NULL', grossWeight: 'DECIMAL(16,6) NULL', netWeight: 'DECIMAL(16,6) NULL',
-      moq: 'INT NULL', quoteType: "VARCHAR(32) NOT NULL DEFAULT 'production'", blankSpec: 'LONGTEXT NULL',
-      finishedSpec: 'LONGTEXT NULL', strategyVersionId: 'BIGINT NULL', priceSnapshot: 'LONGTEXT NULL',
-      processSnapshot: 'LONGTEXT NULL', finalUnitPrice: 'DECIMAL(16,4) NULL',
-      finalConfirmedBy: 'VARCHAR(128) NULL', finalConfirmedAt: 'DATETIME NULL'
+      materialCode: 'VARCHAR(128) NULL', partDescription: 'TEXT NULL',
+      grossWeight: 'DECIMAL(16,6) NULL', netWeight: 'DECIMAL(16,6) NULL',
+      blankSpec: 'LONGTEXT NULL', finishedSpec: 'LONGTEXT NULL', strategyVersionId: 'BIGINT NULL',
+      priceSnapshot: 'LONGTEXT NULL', processSnapshot: 'LONGTEXT NULL', finalUnitPrice: 'DECIMAL(16,4) NULL'
     };
     for (const [column, definition] of Object.entries(quoteColumns)) {
       await ensureColumn(connection, 'quotes', column, definition);
@@ -135,8 +120,6 @@ async function ensureSchema() {
         id BIGINT AUTO_INCREMENT PRIMARY KEY,
         code VARCHAR(128) NOT NULL UNIQUE,
         name VARCHAR(255) NOT NULL,
-        specification VARCHAR(255) NULL,
-        priceUnit VARCHAR(32) NOT NULL DEFAULT 'kg',
         active TINYINT(1) NOT NULL DEFAULT 1,
         createdBy VARCHAR(128) NULL,
         createdAt DATETIME NOT NULL,
@@ -148,8 +131,6 @@ async function ensureSchema() {
         id BIGINT AUTO_INCREMENT PRIMARY KEY,
         materialId BIGINT NOT NULL,
         unitPrice DECIMAL(16,4) NOT NULL,
-        currency VARCHAR(16) NOT NULL DEFAULT 'CNY',
-        taxIncluded TINYINT(1) NOT NULL DEFAULT 0,
         effectiveAt DATETIME NOT NULL,
         confirmedAt DATETIME NULL,
         source VARCHAR(255) NULL,
@@ -170,7 +151,6 @@ async function ensureSchema() {
         hourlyRate DECIMAL(16,4) NULL,
         unitRate DECIMAL(16,4) NULL,
         fixedAmount DECIMAL(16,4) NULL,
-        unit VARCHAR(32) NULL,
         active TINYINT(1) NOT NULL DEFAULT 1,
         operatorName VARCHAR(128) NULL,
         changeReason VARCHAR(500) NULL,
@@ -181,10 +161,7 @@ async function ensureSchema() {
     await connection.query(`
       CREATE TABLE IF NOT EXISTS pricing_strategies (
         id BIGINT AUTO_INCREMENT PRIMARY KEY,
-        code VARCHAR(128) NOT NULL,
-        name VARCHAR(255) NOT NULL,
-        version INT NOT NULL DEFAULT 1,
-        status VARCHAR(32) NOT NULL DEFAULT 'draft',
+        name VARCHAR(255) NOT NULL UNIQUE,
         materialLossRate DECIMAL(10,6) NOT NULL DEFAULT 0,
         toolLossRate DECIMAL(10,6) NOT NULL DEFAULT 0,
         overheadRate DECIMAL(10,6) NOT NULL DEFAULT 0,
@@ -192,55 +169,10 @@ async function ensureSchema() {
         taxRate DECIMAL(10,6) NOT NULL DEFAULT 0.13,
         sampleMultiplier DECIMAL(10,6) NOT NULL DEFAULT 2,
         setupFeeDefault DECIMAL(16,4) NOT NULL DEFAULT 300,
-        setupFeeMin DECIMAL(16,4) NOT NULL DEFAULT 300,
-        setupFeeMax DECIMAL(16,4) NOT NULL DEFAULT 600,
-        priceStaleDays INT NOT NULL DEFAULT 30,
-        config LONGTEXT NULL,
-        publishedAt DATETIME NULL,
-        publishedBy VARCHAR(128) NULL,
         createdBy VARCHAR(128) NOT NULL,
         changeReason VARCHAR(500) NOT NULL,
         createdAt DATETIME NOT NULL,
-        updatedAt DATETIME NOT NULL,
-        UNIQUE KEY uq_strategy_version (code, version),
-        INDEX idx_strategy_active (status, code)
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    `);
-    await connection.query(`
-      CREATE TABLE IF NOT EXISTS part_masters (
-        id BIGINT AUTO_INCREMENT PRIMARY KEY,
-        materialCode VARCHAR(128) NOT NULL UNIQUE,
-        customer VARCHAR(255) NULL,
-        partName VARCHAR(255) NOT NULL,
-        partDescription TEXT NULL,
-        materialId BIGINT NULL,
-        blankSpec LONGTEXT NULL,
-        finishedSpec LONGTEXT NULL,
-        grossWeight DECIMAL(16,6) NULL,
-        netWeight DECIMAL(16,6) NULL,
-        moq INT NULL,
-        defaultStrategyCode VARCHAR(128) NULL,
-        processRoute LONGTEXT NULL,
-        sourceReference VARCHAR(255) NULL,
-        status VARCHAR(32) NOT NULL DEFAULT 'draft',
-        operatorName VARCHAR(128) NOT NULL,
-        changeReason VARCHAR(500) NOT NULL,
-        createdAt DATETIME NOT NULL,
-        updatedAt DATETIME NOT NULL,
-        INDEX idx_part_master_material (materialId),
-        CONSTRAINT fk_part_material FOREIGN KEY (materialId) REFERENCES materials(id)
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    `);
-    await connection.query(`
-      CREATE TABLE IF NOT EXISTS quote_events (
-        id BIGINT AUTO_INCREMENT PRIMARY KEY,
-        quoteId VARCHAR(64) NOT NULL,
-        eventType VARCHAR(64) NOT NULL,
-        operatorName VARCHAR(128) NULL,
-        reason VARCHAR(500) NULL,
-        payload LONGTEXT NULL,
-        createdAt DATETIME NOT NULL,
-        INDEX idx_quote_events_quote (quoteId, createdAt)
+        updatedAt DATETIME NOT NULL
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
   } finally {

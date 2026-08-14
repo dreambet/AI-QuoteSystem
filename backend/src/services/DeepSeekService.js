@@ -40,7 +40,6 @@ class DeepSeekService {
     "diameter": 直径数值（如果是圆形零件）
   },
   "quantity": 1,
-  "precision": "精度要求（low/medium/high/very_high）",
   "features": [
     {
       "type": "特征类型（hole/slot/thread/surface等）",
@@ -58,7 +57,6 @@ class DeepSeekService {
   },
   "surfaceRequirements": "表面处理要求",
   "heatTreatment": "热处理要求",
-  "complexity": "复杂程度（simple/medium/hard/complex）",
   "estimatedVolume": 估计体积（cm³）,
   "notes": "其他注意事项"
 }

@@ -6,19 +6,17 @@ const jsonFields = new Set([
 ]);
 
 const quoteFields = new Set([
-  'customer', 'materialCode', 'partName', 'partNumber', 'partDescription', 'usageContext', 'material',
-  'length', 'width', 'height', 'diameter', 'grossWeight', 'netWeight', 'moq', 'quoteType', 'quantity',
-  'deliveryDate', 'precision', 'drawingPath', 'blankSpec', 'finishedSpec', 'strategyVersionId', 'priceSnapshot',
-  'processSnapshot', 'calculation', 'aiReview', 'manualReview', 'drawingAnalysis', 'aiQuoteAnalysis',
-  'finalUnitPrice', 'finalConfirmedBy', 'finalConfirmedAt', 'status'
+  'materialCode', 'partName', 'partDescription', 'material',
+  'grossWeight', 'netWeight', 'quantity', 'drawingPath', 'blankSpec', 'finishedSpec',
+  'strategyVersionId', 'priceSnapshot', 'processSnapshot', 'calculation', 'aiReview',
+  'manualReview', 'drawingAnalysis', 'aiQuoteAnalysis', 'finalUnitPrice', 'status'
 ]);
 
 // Browser forms submit an empty input as "". SQLite accepted that value in a
 // numeric column, while MySQL in strict mode correctly rejects it. Keep all
 // optional numeric values nullable before they reach the database.
 const nullableNumericFields = new Set([
-  'length', 'width', 'height', 'diameter', 'grossWeight', 'netWeight', 'moq',
-  'strategyVersionId', 'finalUnitPrice'
+  'grossWeight', 'netWeight', 'strategyVersionId', 'finalUnitPrice'
 ]);
 
 const normalizeOptionalNumber = value => {
@@ -39,24 +37,22 @@ const normalizeFieldValue = (key, value) => {
 };
 
 const serialize = (key, value) => jsonFields.has(key) && value !== null && value !== undefined ? JSON.stringify(value) : value;
-const sqlField = key => key === 'precision' ? '`precision`' : `\`${key}\``;
+const sqlField = key => `\`${key}\``;
 
 class Quote {
   static async create(data) {
     const id = Date.now().toString(36) + Math.random().toString(36).slice(2);
     const stamp = new Date();
     const fields = [
-      'id', 'customer', 'materialCode', 'partName', 'partNumber', 'partDescription', 'usageContext', 'material',
-      'length', 'width', 'height', 'diameter', 'grossWeight', 'netWeight', 'moq', 'quoteType', 'quantity',
-      'deliveryDate', 'precision', 'drawingPath', 'blankSpec', 'finishedSpec', 'strategyVersionId', 'priceSnapshot',
-      'processSnapshot', 'status', 'createdAt', 'updatedAt'
+      'id', 'materialCode', 'partName', 'partDescription', 'material',
+      'grossWeight', 'netWeight', 'quantity', 'drawingPath', 'blankSpec', 'finishedSpec',
+      'strategyVersionId', 'priceSnapshot', 'processSnapshot', 'status', 'createdAt', 'updatedAt'
     ];
     const normalized = {
       ...data,
-      materialCode: data.materialCode || data.partNumber || null,
+      materialCode: data.materialCode || null,
       partName: data.partName || '未命名零件',
       material: data.material || '待确认材料',
-      quoteType: data.quoteType || 'production',
       quantity: normalizeQuantity(data.quantity),
       status: data.status || 'draft',
       createdAt: stamp,

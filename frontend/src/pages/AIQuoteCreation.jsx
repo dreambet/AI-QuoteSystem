@@ -1443,7 +1443,7 @@ function ProcessConfirmPanel({ catalog, processInputs, onProcessInput, onToggleP
     { title: '机加工（填加工时长=选中）', types: ['time'] },
     { title: '损耗率型（填损耗率=选中）', types: ['percentage'] },
     { title: '重量型（勾选=选中）', types: ['weight'] },
-    { title: '固定金额型（填金额=选中）', types: ['manual'] }
+    { title: '单制程成本（填金额=选中）', types: ['manual'] }
   ];
   return <div className="process-confirm-panel">
     <div className="mini-panel-title"><span>工序确认</span><b>填值即选中</b></div>
@@ -1462,7 +1462,7 @@ function ProcessConfirmPanel({ catalog, processInputs, onProcessInput, onToggleP
                 <span className="process-rate">@{p.hourlyRate}元/h<button type="button" className="rate-edit-btn" onClick={() => onEditProcessRate(p)} title="维护工费率">改</button></span>
               </>}
               {p.costType === 'percentage' && <>
-                <input className="proc-input" type="number" step="0.01" placeholder="损耗率" value={inp.rate ?? ''} onChange={e => onProcessInput(p.code, 'rate', e.target.value)} />
+                <input className="proc-input" type="number" step="0.1" placeholder="损耗率%" value={inp.rate ?? ''} onChange={e => onProcessInput(p.code, 'rate', e.target.value)} />
                 <span className="process-rate">×R</span>
               </>}
               {p.costType === 'weight' && <>
@@ -1492,10 +1492,11 @@ function FeatureReviewWorkspace({ quoteId, formData, quote, analysisResult, sele
     value: (type === 'blank' ? blankSpec[key] : finishedSpec[key]) ?? '',
     onChange: e => onSpecChange(type, key, e.target.value)
   });
-  const strategyLabel = (s) => `${s.name}（管销${Number(s.overheadRate)}/利润${Number(s.profitRate)}/税${Number(s.taxRate)}/倍率${Number(s.sampleMultiplier)}/材料损耗${Number(s.materialLossRate)}/刀具损耗${Number(s.toolLossRate)}）`;
+  const pct = v => `${Number(v) * 100}%`;
+  const strategyLabel = (s) => `${s.name}（管销${pct(s.overheadRate)}/利润${pct(s.profitRate)}/税${pct(s.taxRate)}/倍率${Number(s.sampleMultiplier)}/材料损耗${pct(s.materialLossRate)}/刀具损耗${pct(s.toolLossRate)}）`;
   const firstStrategy = (catalog.strategies || [])[0];
   const defaultStrategyLabel = firstStrategy
-    ? `默认（同${firstStrategy.name}：管销${Number(firstStrategy.overheadRate)}/利润${Number(firstStrategy.profitRate)}/税${Number(firstStrategy.taxRate)}/倍率${Number(firstStrategy.sampleMultiplier)}/材料损耗${Number(firstStrategy.materialLossRate)}/刀具损耗${Number(firstStrategy.toolLossRate)}）`
+    ? `默认（同${firstStrategy.name}：管销${pct(firstStrategy.overheadRate)}/利润${pct(firstStrategy.profitRate)}/税${pct(firstStrategy.taxRate)}/倍率${Number(firstStrategy.sampleMultiplier)}/材料损耗${pct(firstStrategy.materialLossRate)}/刀具损耗${pct(firstStrategy.toolLossRate)}）`
     : '默认';
   return <div className="feature-review">
     <WorkspaceTitle eyebrow="STEP 03 / FEATURE REVIEW" title={is2DDrawing ? '确认图纸特征与成本参数' : '确认特征与成本参数'} description="参照渲染图纸核对尺寸，填写材料/产品规格，并在右侧确认工序与单价后计算报价。" badge={analysisResult?.modelInfo?.label || 'CAD 模型已载入'} />
@@ -1533,7 +1534,13 @@ function FeatureReviewWorkspace({ quoteId, formData, quote, analysisResult, sele
             <span>材质</span>
             <select value={formData.material} onChange={e => onMaterialChange(e.target.value)}>
               <option value="">（选择材质）</option>
-              {(catalog.materials || []).map(m => <option key={m.id} value={m.code}>{m.name}{m.unitPrice != null && m.unitPrice !== '' ? `（¥${m.unitPrice}/kg）` : ''}</option>)}
+              {(catalog.materials || []).map(m => {
+                const hasPrice = m.unitPrice != null && m.unitPrice !== '';
+                const priceTxt = hasPrice ? `¥${Number(m.unitPrice).toFixed(2)}/kg` : '';
+                const confTxt = m.priceConfirmedAt ? ` · ${new Date(m.priceConfirmedAt).toLocaleDateString('zh-CN')} 确认` : '';
+                const staleTxt = hasPrice && m.priceStale ? ' · 超30天待复核' : '';
+                return <option key={m.id} value={m.code}>{m.name}{hasPrice ? `（${priceTxt}${confTxt}${staleTxt}）` : ''}</option>;
+              })}
               <option value="__new__">（+ 新增材质）</option>
             </select>
           </label>
@@ -1588,9 +1595,8 @@ function AIQuoteCreation() {
   const [catalog, setCatalog] = useState({ materials: [], processes: [], strategies: [] });
   const [processInputs, setProcessInputs] = useState({});
   const [formData, setFormData] = useState({
-    partName: '', partNumber: '', materialCode: '', material: 'S31603',
-    quantity: 1, precision: '中等', deliveryDate: '',
-    length: '', width: '', height: '', diameter: '',
+    partName: '', materialCode: '', material: 'S31603',
+    quantity: 1,
     blankSpec: { '材质': 'S31603', '料长': '', '步距': '', '料宽': '', '外径': '', '内径': '', '料厚': '', '毛重': '', 'MOQ': '' },
     finishedSpec: { '料长': '', '料宽': '', '外径': '', '料厚': '', '净重': '' },
     unitPrice: '', setupFee: 300, strategyId: ''
@@ -1623,7 +1629,14 @@ function AIQuoteCreation() {
       } catch (err) { setError(err.response?.data?.error || '新增材质失败'); }
       return;
     }
-    setFormData(data => ({ ...data, material: value, blankSpec: { ...data.blankSpec, '材质': value } }));
+    // 选中已有材质：自动将目录当前 active 单价带入「单价确认-材料单价」，无需手填
+    const material = (catalog.materials || []).find(m => m.code === value);
+    setFormData(data => ({
+      ...data,
+      material: value,
+      blankSpec: { ...data.blankSpec, '材质': value },
+      unitPrice: material && material.unitPrice != null && material.unitPrice !== '' ? String(Number(material.unitPrice)) : ''
+    }));
   };
   const chooseFile = (file) => { if (file) { setSelectedFile(file); setError(null); } };
   const onProcessInput = (code, field, value) => setProcessInputs(s => ({ ...s, [code]: { ...(s[code] || {}), [field]: value } }));
@@ -1657,15 +1670,19 @@ function AIQuoteCreation() {
       if (response.data.quote) {
         const q = response.data.quote;
         const dims = response.data.analysis?.dimensions || {};
-        setFormData(d => ({
-          ...d,
-          partName: q.partName || d.partName,
-          material: q.material || d.material,
-          length: q.length ?? '', width: q.width ?? '', height: q.height ?? '', diameter: q.diameter ?? '',
-          quantity: q.quantity || 1, precision: q.precision || '中等',
-          blankSpec: { ...d.blankSpec, '材质': q.material || d.blankSpec['材质'], '料长': dims.length ?? d.blankSpec['料长'], '料宽': dims.width ?? d.blankSpec['料宽'], '料厚': dims.height ?? d.blankSpec['料厚'], '外径': dims.diameter ?? d.blankSpec['外径'] },
-          finishedSpec: { ...d.finishedSpec, '料长': dims.length ?? d.finishedSpec['料长'], '料宽': dims.width ?? d.finishedSpec['料宽'], '料厚': dims.height ?? d.finishedSpec['料厚'], '外径': dims.diameter ?? d.finishedSpec['外径'] }
-        }));
+        setFormData(d => {
+          // AI 识别出材质后，自动带入目录当前 active 单价到「单价确认-材料单价」
+          const mat = (catalog.materials || []).find(m => m.code === (q.material || d.material));
+          return {
+            ...d,
+            partName: q.partName || d.partName,
+            material: q.material || d.material,
+            quantity: q.quantity || 1,
+            blankSpec: { ...d.blankSpec, '材质': q.material || d.blankSpec['材质'], '料长': dims.length ?? d.blankSpec['料长'], '料宽': dims.width ?? d.blankSpec['料宽'], '料厚': dims.height ?? d.blankSpec['料厚'], '外径': dims.diameter ?? d.blankSpec['外径'] },
+            finishedSpec: { ...d.finishedSpec, '料长': dims.length ?? d.finishedSpec['料长'], '料宽': dims.width ?? d.finishedSpec['料宽'], '料厚': dims.height ?? d.finishedSpec['料厚'], '外径': dims.diameter ?? d.finishedSpec['外径'] },
+            unitPrice: mat && mat.unitPrice != null && mat.unitPrice !== '' ? String(Number(mat.unitPrice)) : d.unitPrice
+          };
+        });
       }
       setStep(3);
     } catch (err) { setError(err.response?.data?.error || '图纸分析失败'); } finally { setLoading(false); }
@@ -1677,15 +1694,15 @@ function AIQuoteCreation() {
       const netWeight = num(formData.finishedSpec?.['净重']);
       await quoteApi.update(quoteId, {
         partName: formData.partName, materialCode: formData.materialCode, material: formData.material,
-        quantity: formData.quantity, precision: formData.precision, deliveryDate: formData.deliveryDate,
-        grossWeight, netWeight, moq: num(formData.blankSpec?.['MOQ']) || null,
+        quantity: formData.quantity,
+        grossWeight, netWeight,
         blankSpec: formData.blankSpec, finishedSpec: formData.finishedSpec
       });
       const strategy = resolveStrategy();
       const processSelection = (catalog.processes || []).map(p => {
         const inp = processInputs[p.code] || {};
         if (p.costType === 'time') { const mins = num(inp.minutes); return mins > 0 ? { processCode: p.code, costType: 'time', hourlyRate: num(p.hourlyRate), minutes: mins } : null; }
-        if (p.costType === 'percentage') { const rate = (inp.rate !== '' && inp.rate != null) ? num(inp.rate) : (p.code === 'material-loss' ? num(strategy.materialLossRate) : p.code === 'tool-loss' ? num(strategy.toolLossRate) : 0); return rate > 0 ? { processCode: p.code, costType: 'percentage', rate } : null; }
+        if (p.costType === 'percentage') { const rate = (inp.rate !== '' && inp.rate != null) ? num(inp.rate) / 100 : (p.code === 'material-loss' ? num(strategy.materialLossRate) : p.code === 'tool-loss' ? num(strategy.toolLossRate) : 0); return rate > 0 ? { processCode: p.code, costType: 'percentage', rate } : null; }
         if (p.costType === 'weight') { return inp.enabled ? { processCode: p.code, costType: 'weight', unitRate: num(p.unitRate) } : null; }
         if (p.costType === 'manual') { const amt = num(inp.amount); return amt > 0 ? { processCode: p.code, costType: 'manual', amount: amt } : null; }
         return null;

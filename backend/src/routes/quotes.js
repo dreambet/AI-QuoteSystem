@@ -75,8 +75,8 @@ async function upsertMaterialPrice(materialCode, unitPrice, operator = 'manual-q
     const now = new Date();
     await conn.query(
       `INSERT INTO material_prices
-        (materialId, unitPrice, currency, taxIncluded, effectiveAt, confirmedAt, source, status, operatorName, changeReason, createdAt)
-       VALUES (?, ?, 'CNY', 0, ?, ?, 'manual', 'active', ?, ?, ?)`,
+        (materialId, unitPrice, effectiveAt, confirmedAt, source, status, operatorName, changeReason, createdAt)
+       VALUES (?, ?, ?, ?, 'manual', 'active', ?, ?, ?)`,
       [materialId, Number(unitPrice), now, now, operator, '报价流程确认单价', now]
     );
     await conn.commit();
@@ -100,7 +100,7 @@ async function resolveStrategy(strategyVersionId, overrides = {}) {
     row = rows[0];
   }
   if (!row) {
-    const rows = await db.query("SELECT * FROM pricing_strategies WHERE status = 'published' ORDER BY id LIMIT 1");
+    const rows = await db.query('SELECT * FROM pricing_strategies ORDER BY id LIMIT 1');
     row = rows[0];
   }
   if (!row) {
@@ -108,7 +108,6 @@ async function resolveStrategy(strategyVersionId, overrides = {}) {
   }
   return {
     id: row.id,
-    code: row.code,
     overheadRate: overrides.overheadRate != null ? num(overrides.overheadRate) : num(row.overheadRate),
     profitRate: overrides.profitRate != null ? num(overrides.profitRate) : num(row.profitRate),
     taxRate: overrides.taxRate != null ? num(overrides.taxRate) : (row.taxRate == null ? 0.13 : num(row.taxRate)),
@@ -242,7 +241,7 @@ router.post('/:id/calculate', async (req, res) => {
     };
     const processSnapshot = {
       processSelection: selection,
-      strategy: { id: strategy.id, code: strategy.code, overheadRate: strategy.overheadRate, profitRate: strategy.profitRate, taxRate: strategy.taxRate, sampleMultiplier: strategy.sampleMultiplier, materialLossRate: strategy.materialLossRate, toolLossRate: strategy.toolLossRate, setupFee: fee },
+      strategy: { id: strategy.id, overheadRate: strategy.overheadRate, profitRate: strategy.profitRate, taxRate: strategy.taxRate, sampleMultiplier: strategy.sampleMultiplier, materialLossRate: strategy.materialLossRate, toolLossRate: strategy.toolLossRate, setupFee: fee },
       computed: { processes: calculation.processes, additions: calculation.additions }
     };
 
@@ -381,10 +380,10 @@ router.post('/:id/analyze-drawing', uploadDrawing.single('drawing'), async (req,
         }
 
         const dimensions = {
-          length: quote.length || 100,
-          width: quote.width || 50,
-          height: quote.height || 20,
-          diameter: quote.diameter || 0
+          length: num((quote.blankSpec || {})['料长']) || 100,
+          width: num((quote.blankSpec || {})['料宽']) || 50,
+          height: num((quote.blankSpec || {})['料厚']) || 20,
+          diameter: num((quote.blankSpec || {})['外径']) || 0
         };
 
         if (parseResult.bounds) {
@@ -425,11 +424,9 @@ router.post('/:id/analyze-drawing', uploadDrawing.single('drawing'), async (req,
           material: quote.material || '钢材',
           dimensions,
           quantity: quote.quantity || 1,
-          precision: quote.precision || '中等',
           features: parseResult.features || [],
           dimensionAnnotations: dimAnn,
           globalTolerance: parseResult.globalTolerance || null,
-          complexity: '中等',
           notes: parseResult.message || 'CAD文件已解析，请手动确认参数',
           modelInfo,
           cadInfo: { ...cadInfo, modelInfo }
@@ -446,9 +443,7 @@ router.post('/:id/analyze-drawing', uploadDrawing.single('drawing'), async (req,
             diameter: quote.diameter || 0
           },
           quantity: quote.quantity || 1,
-          precision: quote.precision || '中等',
           features: [],
-          complexity: '中等',
           notes: `CAD解析失败: ${parseError.message || '未知错误'}，请手动确认参数`
         };
       }
@@ -467,9 +462,7 @@ router.post('/:id/analyze-drawing', uploadDrawing.single('drawing'), async (req,
             height: quote.height || 20
           },
           quantity: quote.quantity || 1,
-          precision: quote.precision || '中等',
           features: [],
-          complexity: '中等',
           notes: 'AI分析暂时不可用，请手动确认参数'
         };
       }
@@ -483,9 +476,7 @@ router.post('/:id/analyze-drawing', uploadDrawing.single('drawing'), async (req,
           height: quote.height || 20
         },
         quantity: quote.quantity || 1,
-        precision: quote.precision || '中等',
         features: [],
-        complexity: '中等',
         notes: `不支持的文件格式: ${ext}，请上传 DWG/DXF/STEP 或图片格式`
       };
     }
@@ -494,14 +485,7 @@ router.post('/:id/analyze-drawing', uploadDrawing.single('drawing'), async (req,
     const updateData = { drawingAnalysis: analysisResult };
     if (analysisResult.partName) updateData.partName = analysisResult.partName;
     if (analysisResult.material) updateData.material = analysisResult.material;
-    if (analysisResult.dimensions) {
-      updateData.length = analysisResult.dimensions.length;
-      updateData.width = analysisResult.dimensions.width;
-      updateData.height = analysisResult.dimensions.height;
-      updateData.diameter = analysisResult.dimensions.diameter;
-    }
     if (analysisResult.quantity) updateData.quantity = analysisResult.quantity;
-    if (analysisResult.precision) updateData.precision = analysisResult.precision;
 
     const updatedQuote = await Quote.update(req.params.id, updateData);
 
