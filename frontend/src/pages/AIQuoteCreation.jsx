@@ -1636,6 +1636,10 @@ function AIQuoteCreation() {
       try {
         const q = (await quoteApi.getById(id)).data;
         if (!q || q.status === 'finalized' || q.status === 'rejected') { sessionStorage.removeItem(WORKBENCH_SESSION_KEY); return; }
+        // 流程已交付（AI 建议已生成）：视为完成，不再自动续走，清空会话回到第1步开始新报价；
+        // 仅当从详情页明确带 ?resume= 进入时才恢复（查看/复核场景）
+        const flowFinished = !!q.aiQuoteAnalysis || (saved?.quoteId === id && saved.step >= 5);
+        if (flowFinished && !resumeId) { sessionStorage.removeItem(WORKBENCH_SESSION_KEY); return; }
         const sameTask = saved?.quoteId === q.id;
         const analysis = (sameTask && saved.analysisResult) || q.drawingAnalysis || null;
         const analysisReady = !!(analysis && (analysis.features?.length || analysis.modelInfo || analysis.notes));
@@ -1649,7 +1653,8 @@ function AIQuoteCreation() {
           strategyId: q.processSnapshot?.strategy?.id != null ? String(q.processSnapshot.strategy.id) : ''
         });
         if (sameTask && saved.processInputs) setProcessInputs(saved.processInputs);
-        setStep(sameTask && saved.step ? saved.step : analysisReady ? 3 : 2);
+        // 恢复步骤：有会话用会话步骤；否则按数据完成度推导（分析->计算->AI建议）
+        setStep(sameTask && saved.step ? saved.step : analysisReady ? (q.calculation ? (q.aiQuoteAnalysis ? 5 : 4) : 3) : 2);
       } catch { /* 恢复失败按新任务处理 */ }
     })();
   }, []);
