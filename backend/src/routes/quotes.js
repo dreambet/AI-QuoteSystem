@@ -6,7 +6,9 @@ const QuoteCalculator = require('../services/QuoteCalculator');
 const AIReviewer = require('../services/AIReviewer');
 const QuoteGenerator = require('../services/QuoteGenerator');
 const DeepSeekService = require('../services/DeepSeekService');
-const CADParserService = require('../services/CADParserService');
+const cadParserPool = require('../services/cadParserPool');
+// 启动即预热解析 worker（加载 occt WASM），首次图纸分析无需叠加初始化耗时
+cadParserPool.warmup().catch(() => {});
 const db = require('../db');
 const path = require('path');
 const fs = require('fs');
@@ -367,13 +369,13 @@ router.post('/:id/analyze-drawing', uploadDrawing.single('drawing'), async (req,
     let analysisResult;
 
     if (cadExtensions.includes(ext)) {
-      // --- CAD 文件解析 ---
+      // --- CAD 文件解析（worker 线程执行 + 同文件缓存，不阻塞事件循环） ---
       try {
-        const parseResult = ext === '.dxf'
-          ? await CADParserService.parseDXF(fullPath)
+        const { result: parseResult, cached: parseCached } = ext === '.dxf'
+          ? await cadParserPool.parseDXF(fullPath)
           : ext === '.dwg'
-            ? await CADParserService.parseDWG(fullPath)
-            : await CADParserService.parseSTEP(fullPath);
+            ? await cadParserPool.parseDWG(fullPath)
+            : await cadParserPool.parseSTEP(fullPath);
 
         if (!parseResult.success) {
           throw new Error(parseResult.error || 'CAD文件解析失败');
@@ -412,12 +414,16 @@ router.post('/:id/analyze-drawing', uploadDrawing.single('drawing'), async (req,
         let modelInfo = parseResult.modelInfo || { type: 'none', available: false };
         const modelCachePath = path.join(modelsDir, `${quote.id}.json`);
         if (parseResult.model?.meshes?.length) {
-          fs.writeFileSync(modelCachePath, JSON.stringify(parseResult.model));
+          // 命中解析缓存且模型缓存文件仍在时跳过重写（内容相同，避免每次分析都写数 MB 文件）
+          if (!parseCached || !fs.existsSync(modelCachePath)) {
+            await fs.promises.writeFile(modelCachePath, JSON.stringify(parseResult.model));
+          }
           modelInfo = { ...modelInfo, cached: true, endpoint: `/api/quotes/${quote.id}/3d-model` };
         } else if (fs.existsSync(modelCachePath)) {
-          fs.unlinkSync(modelCachePath);
+          await fs.promises.unlink(modelCachePath).catch(() => {});
         }
-        const { model, ...cadInfo } = parseResult;
+        // features/dimensionAnnotations 已是顶层字段，cadInfo 里不再重复携带（此前双份存储使 drawingAnalysis 体积翻倍）
+        const { model, features: _f, dimensionAnnotations: _d, ...cadInfo } = parseResult;
 
         analysisResult = {
           partName: quote.partName || '未命名零件',
@@ -489,10 +495,12 @@ router.post('/:id/analyze-drawing', uploadDrawing.single('drawing'), async (req,
 
     const updatedQuote = await Quote.update(req.params.id, updateData);
 
+    // 响应瘦身：drawingAnalysis 已单独作为 analysis 返回，quote 里不再重复携带数百 KB
+    const { drawingAnalysis: _skipAnalysis, ...slimQuote } = updatedQuote || {};
     res.json({
       success: true,
       analysis: analysisResult,
-      quote: updatedQuote
+      quote: slimQuote
     });
 
   } catch (error) {
@@ -581,7 +589,7 @@ router.get('/:id/3d-model', async (req, res) => {
       success: true,
       modelType: 'mesh',
       source: 'step',
-      model: JSON.parse(fs.readFileSync(modelPath, 'utf8'))
+      model: JSON.parse(await fs.promises.readFile(modelPath, 'utf8'))
     });
 
   } catch (error) {

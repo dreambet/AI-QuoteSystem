@@ -69,7 +69,7 @@ W = V × 样品倍率                     // 样品价格（产品5倍率=1，W=
 - **`QuoteCalculator.js`**：确定性计算引擎（非 AI）。
 
 ### 路由
-- `/api/quotes`（`routes/quotes.js`）：CRUD + `/:id/calculate` + `/:id/analyze-drawing` + `/:id/ai-quote` + `/:id/ai-review` + `/:id/manual-review` + `/:id/export`(PDF) + `/:id/3d-model`。`GET /` 支持 `?materialCode=&partName=&partDescription=&q=&status=` 追溯过滤。**无图纸下载端点**——详情页只展示 drawingPath 文件名，唯一文件下载是 PDF 报价单导出（`res.download` 仅用于 PDF）。
+- `/api/quotes`（`routes/quotes.js`）：CRUD + `/:id/calculate` + `/:id/analyze-drawing` + `/:id/ai-quote` + `/:id/ai-review` + `/:id/manual-review` + `/:id/export`(PDF) + `/:id/3d-model`。`GET /` 支持 `?materialCode=&partName=&partDescription=&q=&status=` 追溯过滤；**列表查询是瘦身投影**（`Quote.LIST_SELECT`：只取展示列 + `JSON_EXTRACT` 抽 calculation.total/blankSpec.MOQ/priceSnapshot.unitPrice，勿改回 `SELECT *`--drawingAnalysis 等 LONGTEXT JSON 列单行数百 KB，57 行实测 7MB+）。**无图纸下载端点**——详情页只展示 drawingPath 文件名，唯一文件下载是 PDF 报价单导出（`res.download` 仅用于 PDF）。
 - `/api/catalog`（`routes/catalog.js`）：`GET materials`(含 active 价格+stale 标记)/`processes`/`strategies`；`POST materials/:id/prices`(确认单价，写历史)；`POST strategies`(新增成本策略，name 唯一校验)/`DELETE strategies/:id`(直接删，已有报价由 processSnapshot 快照保护)/`PUT strategies/:id`(改 name+7率+changeReason 审计)；`PUT processes/:id`(改工费率)。**已无 part-masters 路由**。
 - `/api/upload`（`routes/upload.js`）：`POST /drawing`（multer 单文件上传）。
 - `/api/assistant`（Dify 聊天代理，与报价无关）。
@@ -79,6 +79,7 @@ W = V × 样品倍率                     // 样品价格（产品5倍率=1，W=
 `draft` -> `calculated` -> `ai_reviewed` -> `manually_reviewed` -> `finalized`；AI 报价路径 `ai_quoted`；`rejected`。每个端点写回对应 JSON 并推进 status。PDF 导出需 `manualReview.status === 'approved'`。
 
 ### CAD 解析链（`CADParserService.js`）
+- 路由不直接调 CADParserService，而是经 `cadParserPool.js`（`cadParserWorker.js` worker 线程）：occt STEP 网格化是 CPU 密集同步操作，放 worker 避免阻塞事件循环；结果跨线程传 JSON 字符串（结构化克隆大数值数组极慢）；同文件（路径+大小+mtime）结果 LRU 缓存（6 条），重复分析毫秒级；服务启动时 `warmup()` 预载 occt WASM。
 - DXF：`dxf-parser`；DWG：`dwgdxf`(WASM) 进程内转 DXF；STEP：`occt-import-js` 读三角网格，缓存 `uploads/models/{quoteId}.json`。三库均已是最新版且 license 可用（MIT/MIT/LGPL-2.1）。
 - 2D 图纸产出参数化模型规格，前端 three.js 拉伸成 3D。AI 提取的尺寸（length/width/height/diameter）在第3步预填到 blankSpec/finishedSpec，**不直接参与成本计算**（成本主输入是毛重/净重/单价/工序）。
 - **尺寸标注/公差提取**：`_extractDimensions` 从 DIMENSION 实体提取类型(线性/对齐/角度/直径/半径/坐标)、实测值、文本、位置、角度；公差优先从文本解析，回退到 DIMSTYLE 全局变量(`$DIMTP`/`$DIMTM`/`$DIMTOL`)。结果经 `analyze-drawing` 写入 `drawingAnalysis.dimensionAnnotations` + `globalTolerance`，并用于 `dimensions` 预填(直径/线性标注覆盖 bounds 估算)。

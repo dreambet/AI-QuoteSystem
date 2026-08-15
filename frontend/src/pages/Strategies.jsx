@@ -104,7 +104,7 @@ function Strategies() {
 
   return <div className="quote-center-page">
     <section className="quote-center-hero">
-      <div><span className="eyebrow">PRICING STRATEGY / ADMIN</span><h1>成本策略</h1><p>维护报价策略的损耗率/管销/利润/税/样品倍率/调机费。5 个百分率以百分数显示（存储为小数，计算用小数）；策略名称唯一，新建或修改的策略会同步到 AI 工作台第3步的"报价策略选择"下拉。</p></div>
+      <div><span className="eyebrow">PRICING STRATEGY / ADMIN</span><h1>成本策略</h1><p>维护报价策略的损耗率/管销/利润/税/样品倍率/调机费。</p></div>
       <div className="quote-center-actions"><button type="button" className="primary-action link-action" onClick={openCreate}>新建策略</button></div>
     </section>
 

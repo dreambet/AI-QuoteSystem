@@ -65,8 +65,41 @@ class Quote {
     return this.findById(id);
   }
 
+  // 列表页只需少量展示字段；quotes 表含多个数百 KB 的 LONGTEXT JSON 列（drawingAnalysis 等），
+  // SELECT * 会让列表接口随任务数线性膨胀（57 行实测 7MB+）。这里只取必要列，
+  // calculation.total / blankSpec.MOQ / priceSnapshot.unitPrice 用 JSON_EXTRACT 抽取。
+  static get LIST_SELECT() {
+    // NULLIF 防 JSON 列存空串时 JSON_EXTRACT 报错
+    return 'SELECT `id`, `materialCode`, `partName`, `partDescription`, `material`, `quantity`, `status`, `createdAt`, `updatedAt`, '
+      + "JSON_UNQUOTE(JSON_EXTRACT(NULLIF(`calculation`, ''), '$.total')) AS `calcTotal`, "
+      + "JSON_UNQUOTE(JSON_EXTRACT(NULLIF(`blankSpec`, ''), '$.MOQ')) AS `moq`, "
+      + "JSON_UNQUOTE(JSON_EXTRACT(NULLIF(`priceSnapshot`, ''), '$.unitPrice')) AS `priceUnit` ";
+  }
+
+  static _projectListRow(row) {
+    const calcTotal = row.calcTotal !== null && row.calcTotal !== undefined && row.calcTotal !== '' ? Number(row.calcTotal) : null;
+    const moq = row.moq !== null && row.moq !== undefined && row.moq !== '' ? Number(row.moq) : null;
+    const priceUnit = row.priceUnit !== null && row.priceUnit !== undefined && row.priceUnit !== '' ? Number(row.priceUnit) : null;
+    return {
+      id: row.id,
+      materialCode: row.materialCode,
+      partName: row.partName,
+      partDescription: row.partDescription,
+      material: row.material,
+      quantity: row.quantity,
+      status: row.status,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+      // 保持前端既有取值结构不变：quote.calculation.total / quote.blankSpec.MOQ / quote.priceSnapshot.unitPrice
+      calculation: calcTotal != null && Number.isFinite(calcTotal) ? { total: calcTotal } : null,
+      blankSpec: moq != null && Number.isFinite(moq) ? { MOQ: moq } : {},
+      priceSnapshot: priceUnit != null && Number.isFinite(priceUnit) ? { unitPrice: priceUnit } : null
+    };
+  }
+
   static async findAll() {
-    return db.query('SELECT * FROM quotes ORDER BY createdAt DESC');
+    const rows = await db.query(`${this.LIST_SELECT} FROM quotes ORDER BY createdAt DESC`);
+    return rows.map(row => this._projectListRow(row));
   }
 
   // 多字段追溯搜索：materialCode / partName / partDescription / 通用 q
@@ -84,7 +117,8 @@ class Quote {
       params.push(like, like, like);
     }
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-    return db.query(`SELECT * FROM quotes ${where} ORDER BY createdAt DESC`, params);
+    const rows = await db.query(`${this.LIST_SELECT} FROM quotes ${where} ORDER BY createdAt DESC`, params);
+    return rows.map(row => this._projectListRow(row));
   }
 
   static async findById(id) {
