@@ -22,7 +22,15 @@ if (!fs.existsSync(modelsDir)) {
   fs.mkdirSync(modelsDir, { recursive: true });
 }
 
-// 图纸上传 multer 配置（与 upload.js 保持一致的存储规则）
+// 图纸上传 multer 配置（与 upload.js 保持一致的存储规则与格式限制）
+const DRAWING_EXTENSIONS = ['.dwg', '.dxf', '.step', '.stp'];
+const drawingFileFilter = (req, file, cb) => {
+  const ext = path.extname(file.originalname).toLowerCase();
+  if (!DRAWING_EXTENSIONS.includes(ext)) {
+    return cb(new Error('不支持的图纸格式，仅支持 DWG/DXF/STEP/STP'));
+  }
+  cb(null, true);
+};
 const drawingStorage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadsDir),
   filename: (req, file, cb) => {
@@ -30,7 +38,7 @@ const drawingStorage = multer.diskStorage({
     cb(null, uniqueSuffix + path.extname(file.originalname));
   }
 });
-const uploadDrawing = multer({ storage: drawingStorage });
+const uploadDrawing = multer({ storage: drawingStorage, fileFilter: drawingFileFilter });
 
 // ---------- 计算辅助 ----------
 const num = (value, fallback = 0) => {
@@ -332,8 +340,6 @@ router.post('/:id/analyze-drawing', uploadDrawing.single('drawing'), async (req,
       return res.status(404).json({ error: 'Quote not found' });
     }
 
-    const context = req.body.context || '';
-
     // 确定图纸路径：上传文件 > 请求体 drawingPath > quote 上已存的 drawingPath
     let drawingPath;
     if (req.file) {
@@ -363,7 +369,6 @@ router.post('/:id/analyze-drawing', uploadDrawing.single('drawing'), async (req,
     }
 
     const ext = path.extname(fullPath).toLowerCase();
-    const imageExtensions = ['.png', '.jpg', '.jpeg', '.bmp', '.webp'];
     const cadExtensions = ['.dxf', '.dwg', '.step', '.stp'];
 
     let analysisResult;
@@ -453,25 +458,6 @@ router.post('/:id/analyze-drawing', uploadDrawing.single('drawing'), async (req,
           notes: `CAD解析失败: ${parseError.message || '未知错误'}，请手动确认参数`
         };
       }
-    } else if (imageExtensions.includes(ext)) {
-      // --- 图片文件 AI 视觉分析 ---
-      try {
-        analysisResult = await DeepSeekService.analyzeDrawingWithVision(fullPath, context);
-      } catch (aiError) {
-        console.error('AI分析失败，使用备用分析:', aiError.message);
-        analysisResult = {
-          partName: quote.partName || '未命名零件',
-          material: quote.material || '钢材',
-          dimensions: {
-            length: quote.length || 100,
-            width: quote.width || 50,
-            height: quote.height || 20
-          },
-          quantity: quote.quantity || 1,
-          features: [],
-          notes: 'AI分析暂时不可用，请手动确认参数'
-        };
-      }
     } else {
       analysisResult = {
         partName: quote.partName || '未命名零件',
@@ -483,7 +469,7 @@ router.post('/:id/analyze-drawing', uploadDrawing.single('drawing'), async (req,
         },
         quantity: quote.quantity || 1,
         features: [],
-        notes: `不支持的文件格式: ${ext}，请上传 DWG/DXF/STEP 或图片格式`
+        notes: `不支持的文件格式: ${ext}，请上传 DWG/DXF/STEP/STP 格式图纸`
       };
     }
 

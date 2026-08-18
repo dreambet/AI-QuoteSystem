@@ -422,7 +422,9 @@ const Part3DPreview = memo(function Part3DPreview({ quoteId, formData, analysisR
       <div className={`model-source-badge ${modelInfo.type || 'none'}`}>{modelLabel}</div>
       {hasStepModel && <button type="button" className="model-edge-toggle" onClick={() => setShowEdges(value => !value)}>{showEdges ? '隐藏轮廓' : '显示轮廓'}</button>}
       {loadingModel && <div className="model-message">正在加载原始三维模型…</div>}
-      {!loadingModel && !has2DDrawing && !hasStepModel && <div className="model-message error">{modelError || modelInfo.label || '未识别到可渲染的图纸实体，请检查文件后重试。'}</div>}
+      {!loadingModel && !has2DDrawing && !hasStepModel && (
+        <div className="model-message error">{modelError || modelInfo.label || '未识别到可渲染的图纸实体，请检查文件后重试。'}</div>
+      )}
 
       <Canvas
         camera={has2DDrawing ? { position: [0, 0, 10], fov: 45, near: 0.1, far: 100 } : { position: [8, 5, 8], fov: 45, near: 0.1, far: 100 }}
@@ -727,11 +729,11 @@ function LegacyAIQuoteCreation() {
 
       <div style={{ marginBottom: '30px', padding: '20px', border: '2px dashed #ccc', borderRadius: '8px' }}>
         <h3>📄 图纸上传</h3>
-        <p>支持格式: DWG, DXF, STEP, STP, PNG, JPG, JPEG, PDF</p>
+        <p>支持格式: DWG, DXF, STEP, STP</p>
 
         <input
           type="file"
-          accept=".dwg,.dxf,.step,.stp,.png,.jpg,.jpeg,.pdf"
+          accept=".dwg,.dxf,.step,.stp"
           onChange={handleFileChange}
           style={{ marginBottom: '10px' }}
         />
@@ -1513,10 +1515,6 @@ function FeatureReviewWorkspace({ quoteId, formData, quote, analysisResult, sele
   });
   const pct = v => `${Number(v) * 100}%`;
   const strategyLabel = (s) => `${s.name}（管销${pct(s.overheadRate)}/利润${pct(s.profitRate)}/税${pct(s.taxRate)}/倍率${Number(s.sampleMultiplier)}/材料损耗${pct(s.materialLossRate)}/刀具损耗${pct(s.toolLossRate)}）`;
-  const firstStrategy = (catalog.strategies || [])[0];
-  const defaultStrategyLabel = firstStrategy
-    ? `默认（同${firstStrategy.name}：管销${pct(firstStrategy.overheadRate)}/利润${pct(firstStrategy.profitRate)}/税${pct(firstStrategy.taxRate)}/倍率${Number(firstStrategy.sampleMultiplier)}/材料损耗${pct(firstStrategy.materialLossRate)}/刀具损耗${pct(firstStrategy.toolLossRate)}）`
-    : '默认';
   return <div className="feature-review">
     <WorkspaceTitle eyebrow="STEP 03 / FEATURE REVIEW" title={is2DDrawing ? '确认图纸特征与成本参数' : '确认特征与成本参数'} description="参照渲染图纸核对尺寸，填写材料/产品规格，并在右侧确认工序与单价后计算报价。" badge={analysisResult?.modelInfo?.label || 'CAD 模型已载入'} />
     <div className="review-layout">
@@ -1586,7 +1584,7 @@ function FeatureReviewWorkspace({ quoteId, formData, quote, analysisResult, sele
           <Field label="打样调机费" type="number" name="setupFee" value={formData.setupFee} onChange={onChange} />
           <Field label="报价策略" name="strategyId" value={formData.strategyId} onChange={onChange}>
             <select name="strategyId" value={formData.strategyId} onChange={onChange}>
-              <option value="">{defaultStrategyLabel}</option>
+              <option value="">（选择报价策略）</option>
               {(catalog.strategies || []).map(s => <option key={s.id} value={s.id}>{strategyLabel(s)}</option>)}
             </select>
           </Field>
@@ -1707,7 +1705,16 @@ function AIQuoteCreation() {
       unitPrice: material && material.unitPrice != null && material.unitPrice !== '' ? String(Number(material.unitPrice)) : ''
     }));
   };
-  const chooseFile = (file) => { if (file) { setSelectedFile(file); setError(null); } };
+  const chooseFile = (file) => {
+    if (!file) return;
+    const ext = file.name.slice(file.name.lastIndexOf('.')).toLowerCase();
+    if (!['.dwg', '.dxf', '.step', '.stp'].includes(ext)) {
+      setError('仅支持 DWG / DXF / STEP / STP 格式的 CAD 图纸');
+      return;
+    }
+    setSelectedFile(file);
+    setError(null);
+  };
   const onProcessInput = (code, field, value) => setProcessInputs(s => ({ ...s, [code]: { ...(s[code] || {}), [field]: value } }));
   const onToggleProcess = (code, checked) => setProcessInputs(s => ({ ...s, [code]: { ...(s[code] || {}), enabled: checked } }));
   const onEditProcessRate = async (p) => {
@@ -1791,7 +1798,7 @@ function AIQuoteCreation() {
     try { const response = await quoteApi.aiQuote(quoteId, { useAnalysisData: true }); setQuote(response.data.quote); setAnalysisResult(result => ({ ...(result || {}), aiQuotation: response.data.aiAnalysis })); setStep(5); } catch (err) { setError(err.response?.data?.error || 'AI 报价分析失败'); } finally { setLoading(false); }
   };
 
-  const renderStep1 = () => <div className="step-workspace"><WorkspaceTitle eyebrow="STEP 01 / INTAKE" title="上传机加工图纸" description="先选择图纸建立任务；材料规格、产品规格与工序将在第3步参照解析结果确认。" badge="支持 DWG · DXF · STEP · STP" /><div className="intake-grid intake-single"><section className={`drop-zone ${dragActive ? 'dragging' : ''}`} onDragOver={event => { event.preventDefault(); setDragActive(true); }} onDragLeave={() => setDragActive(false)} onDrop={event => { event.preventDefault(); setDragActive(false); chooseFile(event.dataTransfer.files?.[0]); }}><span className="drop-zone-orbit" /><div className="drop-zone-icon">CAD</div><h3>{selectedFile ? selectedFile.name : '拖拽图纸到此处'}</h3><p>{selectedFile ? `${(selectedFile.size / 1024 / 1024).toFixed(2)} MB · 等待建立分析任务` : '或从本地选择文件。二维图纸与三维模型均可解析。'}</p><label className="secondary-action file-picker">选择图纸<input type="file" accept=".dwg,.dxf,.step,.stp,.png,.jpg,.jpeg,.pdf" onChange={event => chooseFile(event.target.files?.[0])} /></label><div className="format-chips"><span>DWG</span><span>DXF</span><span>STEP</span><span>STP</span><span>PDF / 图片</span></div></section><div className="workspace-actions"><button type="button" className="primary-action" onClick={createQuote} disabled={loading}>{loading ? '正在建立任务…' : '建立分析任务'}</button></div></div></div>;
+  const renderStep1 = () => <div className="step-workspace"><WorkspaceTitle eyebrow="STEP 01 / INTAKE" title="上传机加工图纸" description="先选择图纸建立任务；材料规格、产品规格与工序将在第3步参照解析结果确认。" badge="支持 DWG · DXF · STEP · STP" /><div className="intake-grid intake-single"><section className={`drop-zone ${dragActive ? 'dragging' : ''}`} onDragOver={event => { event.preventDefault(); setDragActive(true); }} onDragLeave={() => setDragActive(false)} onDrop={event => { event.preventDefault(); setDragActive(false); chooseFile(event.dataTransfer.files?.[0]); }}><span className="drop-zone-orbit" /><div className="drop-zone-icon">CAD</div><h3>{selectedFile ? selectedFile.name : '拖拽图纸到此处'}</h3><p>{selectedFile ? `${(selectedFile.size / 1024 / 1024).toFixed(2)} MB · 等待建立分析任务` : '或从本地选择文件。二维图纸与三维模型均可解析。'}</p><label className="secondary-action file-picker">选择图纸<input type="file" accept=".dwg,.dxf,.step,.stp" onChange={event => chooseFile(event.target.files?.[0])} /></label><div className="format-chips"><span>DWG</span><span>DXF</span><span>STEP</span><span>STP</span></div></section><div className="workspace-actions"><button type="button" className="primary-action" onClick={createQuote} disabled={loading}>{loading ? '正在建立任务…' : '建立分析任务'}</button></div></div></div>;
   const renderStep2 = () => <div className="step-workspace"><WorkspaceTitle eyebrow="STEP 02 / AI PARSING" title="智能解析 CAD 图纸" description="系统会识别几何轮廓、尺寸、特征与模型来源，并准备进入人工复核。" badge={fileExtension(quote?.drawingPath)} /><div className="analysis-command"><div className="command-orb">AI</div><div><span className="eyebrow">READY TO ANALYZE</span><h3>{fileName(quote?.drawingPath)}</h3><p>已建立零件任务。开始分析后，系统将提取几何信息并生成特征确认视图。</p></div><button type="button" className="primary-action" onClick={analyzeDrawing} disabled={loading}>{loading ? '正在解析…' : '开始 AI 分析'}</button></div><div className="status-card-grid"><div><span>输入格式</span><strong>{fileExtension(quote?.drawingPath)}</strong><small>CAD 文件已就绪</small></div><div><span>解析范围</span><strong>几何 + 特征</strong><small>尺寸、轮廓、孔位</small></div><div><span>下一节点</span><strong>人工确认</strong><small>进入三维模型复核</small></div></div><div className="workspace-actions"><button type="button" className="secondary-action" onClick={() => setStep(1)}>返回上传</button></div></div>;
   const renderStep4 = () => { const calc = quote?.calculation; const costs = [['材料成本 K', calc?.materialCost], ['机加工成本 R', calc?.machiningCost], ['管销 S', calc?.overhead], ['小计 T', calc?.subtotal], ['利润 U', calc?.profit], ['含税 V', calc?.taxIncluded], ['样品价 W', calc?.samplePrice], ['调机费', calc?.setupFee]]; return <div className="step-workspace"><WorkspaceTitle eyebrow="STEP 04 / PRICING" title="报价成本计算结果" description="费用按 K→R→S→T→U→V→W 公式链生成，可返回第3步调整工序与单价。" badge={calc ? '报价已计算' : '等待计算'} />{calc ? <><div className="quote-result-hero"><div><span>参考总价</span><strong>{money(calc.total)}</strong><small>单价 {money(calc.unitPrice)} · 数量 {formData.quantity}</small></div><span>CALCULATED</span></div><div className="cost-card-grid">{costs.map(([label, value]) => <div key={label}><span>{label}</span><strong>{money(value)}</strong></div>)}</div><div className="workspace-actions"><button type="button" className="secondary-action" onClick={() => setStep(3)}>返回修改参数</button><button type="button" className="primary-action" onClick={requestAiQuote} disabled={loading}>{loading ? 'AI 分析中…' : '生成 AI 报价建议'}</button></div></> : <div className="console-empty">尚未取得报价结果，请先完成特征确认。</div>}</div>; };
   const renderStep5 = () => { const ai = analysisResult?.aiQuotation; const groups = [['材料推荐', ai?.materialRecommendation ? [ai.materialRecommendation] : []], ['工艺建议', ai?.processSuggestions?.map(item => `${item.process || item.name}：${item.reason}`) || []], ['风险提示', ai?.warningPoints || []], ['优化建议', ai?.suggestions || []]]; return <div className="step-workspace"><WorkspaceTitle eyebrow="STEP 05 / DELIVERY" title="报价交付与 AI 建议" description="汇总报价结论、工艺判断和关键风险，支持返回任意已完成步骤复核。" badge="交付就绪" /><div className="delivery-total"><span>最终参考报价</span><strong>{money(quote?.calculation?.total)}</strong><small>{formData.partName || '未命名零件'} · {formData.material} · {formData.quantity} 件</small></div><div className="advice-grid">{groups.map(([title, items]) => <section key={title}><h3>{title}</h3>{items.length ? <ul>{items.map((item, index) => <li key={index}>{item}</li>)}</ul> : <p>暂无额外建议。</p>}</section>)}</div><div className="workspace-actions"><button type="button" className="secondary-action" onClick={() => setStep(4)}>返回报价计算</button><Link className="primary-action link-action" to={`/quotes/${quoteId}`}>查看报价详情</Link><Link className="secondary-action link-action" to="/quotes">返回报价列表</Link></div></div>; };

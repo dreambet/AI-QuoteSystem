@@ -1,107 +1,12 @@
 const axios = require('axios');
-const fs = require('fs');
-const path = require('path');
 const db = require('../db');
 
 class DeepSeekService {
   constructor() {
     this.apiKey = process.env.DEEPSEEK_API_KEY;
     this.baseUrl = process.env.DEEPSEEK_API_BASE || 'https://api.deepseek.com';
+    this.model = process.env.DEEPSEEK_MODEL || 'deepseek-chat';
     this.isConfigured = !!this.apiKey;
-  }
-
-  async analyzeDrawingWithVision(imagePath, additionalContext = '') {
-    if (!this.isConfigured) {
-      throw new Error('DeepSeek API key not configured');
-    }
-
-    try {
-      const imageData = fs.readFileSync(imagePath);
-      const base64Image = imageData.toString('base64');
-      const mimeType = this.getMimeType(imagePath);
-      console.log('---->');
-      const response = await axios.post(
-        `${this.baseUrl}/chat/completions`,
-        {
-          model: 'deepseek-chat',
-          messages: [
-            {
-              role: 'system',
-              content: `你是一个专业的机加工图纸分析专家。请分析提供的图纸，提取详细的机加工参数。
-
-请以JSON格式返回以下信息：
-{
-  "partName": "零件名称（推测或提取）",
-  "material": "推荐材料（如：45号钢、铝材、不锈钢等）",
-  "dimensions": {
-    "length": 长度数值,
-    "width": 宽度数值,
-    "height": 高度数值,
-    "diameter": 直径数值（如果是圆形零件）
-  },
-  "quantity": 1,
-  "features": [
-    {
-      "type": "特征类型（hole/slot/thread/surface等）",
-      "description": "特征描述",
-      "parameters": {
-        "diameter": 直径（如有）,
-        "depth": 深度（如有）,
-        "count": 数量（如有）
-      }
-    }
-  ],
-  "tolerances": {
-    "general": "一般公差",
-    "critical": "关键公差说明"
-  },
-  "surfaceRequirements": "表面处理要求",
-  "heatTreatment": "热处理要求",
-  "estimatedVolume": 估计体积（cm³）,
-  "notes": "其他注意事项"
-}
-
-请确保返回纯粹的JSON，不要有其他文字说明。使用中文回答。`
-            },
-            {
-              role: 'user',
-              content: [
-                {
-                  type: 'text',
-                  text: `请分析这张机加工图纸，提取详细参数。${additionalContext}`
-                },
-                {
-                  type: 'image_url',
-                  image_url: {
-                    url: `data:${mimeType};base64,${base64Image}`
-                  }
-                }
-              ]
-            }
-          ],
-          temperature: 0.3,
-          max_tokens: 4096,
-          response_format: { type: 'json_object' }
-        },
-        {
-          headers: {
-            'Authorization': `Bearer ${this.apiKey}`,
-            'Content-Type': 'application/json'
-          }
-        }
-      );
-
-      const content = response.data.choices[0].message.content;
-      try {
-        return JSON.parse(content);
-      } catch (e) {
-        return { rawText: content, error: 'JSON解析失败' };
-      }
-
-    } catch (error) {
-      console.error('DeepSeek API调用失败:', error.response?.data || error.message);
-      throw new Error(`图纸分析失败: ${error.message}`);
-    }
   }
 
   async analyzeQuoteWithAI(quoteData) {
@@ -113,7 +18,7 @@ class DeepSeekService {
       const response = await axios.post(
         `${this.baseUrl}/chat/completions`,
         {
-          model: 'deepseek-chat',
+          model: this.model,
           messages: [
             {
               role: 'system',
@@ -150,8 +55,7 @@ ${JSON.stringify(quoteData, null, 2)}`
             }
           ],
           temperature: 0.7,
-          max_tokens: 3000,
-          response_format: { type: 'json_object' }
+          max_tokens: 4096,
         },
         {
           headers: {
@@ -163,8 +67,9 @@ ${JSON.stringify(quoteData, null, 2)}`
 
       const content = response.data.choices[0].message.content;
       try {
-        return JSON.parse(content);
+        return this.parseJsonContent(content);
       } catch (e) {
+        console.error('AI返回JSON解析失败:', e.message);
         return { rawText: content };
       }
 
@@ -172,6 +77,23 @@ ${JSON.stringify(quoteData, null, 2)}`
       console.error('DeepSeek报价分析失败:', error);
       return this.fallbackQuoteAnalysis(quoteData);
     }
+  }
+
+  // DeepSeek 概率性用 ```json ... ``` 围栏包裹 JSON（大 payload 时更常见），先剥围栏再解析
+  parseJsonContent(content) {
+    let text = String(content || '').trim();
+    const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    if (fenced) {
+      text = fenced[1].trim();
+    } else {
+      // 无围栏但前后混有说明文字时，截取首尾大括号之间的部分
+      const start = text.indexOf('{');
+      const end = text.lastIndexOf('}');
+      if (start >= 0 && end > start) {
+        text = text.slice(start, end + 1);
+      }
+    }
+    return JSON.parse(text);
   }
 
   async fallbackQuoteAnalysis(quoteData) {
@@ -197,19 +119,6 @@ ${JSON.stringify(quoteData, null, 2)}`
       warningPoints: ['建议进行人工审核', '请确认材料单价为最新市场价'],
       suggestions: ['建议上传更清晰的图纸', '在工序确认面板核对加工时长']
     };
-  }
-
-  getMimeType(filePath) {
-    const ext = path.extname(filePath).toLowerCase();
-    const mimeTypes = {
-      '.png': 'image/png',
-      '.jpg': 'image/jpeg',
-      '.jpeg': 'image/jpeg',
-      '.gif': 'image/gif',
-      '.bmp': 'image/bmp',
-      '.webp': 'image/webp'
-    };
-    return mimeTypes[ext] || 'image/png';
   }
 }
 

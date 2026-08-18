@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-机加工 AI 智能报价系统：上传 CAD 图纸/图片 -> AI 分析 -> **确认材料/产品规格 + 工序 + 单价** -> 按《成本分析.xls》公式链计算报价 -> AI 预审/人工审核 -> 导出 PDF 报价单。前后端分离单仓库，后端 Node.js + Express + **MySQL**，前端 Create React App + React Router + three.js。
+机加工 AI 智能报价系统：上传 CAD 图纸（DWG/DXF/STEP/STP）-> AI 分析 -> **确认材料/产品规格 + 工序 + 单价** -> 按《成本分析.xls》公式链计算报价 -> AI 预审/人工审核 -> 导出 PDF 报价单。前后端分离单仓库，后端 Node.js + Express + **MySQL**，前端 Create React App + React Router + three.js。
+
+> ⚠️ **图纸仅支持 CAD 格式（DWG/DXF/STEP/STP）**，PDF/图片上传与 AI 视觉分析链路已整体移除（防泄密），multer `fileFilter` 在 `quotes.js`/`upload.js` 两处拦截非法格式。
 
 业务模型来源：`D:\Desktop\成本分析.xls` 与 `计算公式总结.md`（成本公式与工序目录的真相来源）。
 

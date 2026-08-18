@@ -10,6 +10,16 @@ if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
 
+// 图纸仅支持 CAD 格式（DWG/DXF/STEP/STP），与 quotes.js 的 multer 规则保持一致
+const DRAWING_EXTENSIONS = ['.dwg', '.dxf', '.step', '.stp'];
+const fileFilter = (req, file, cb) => {
+  const ext = path.extname(file.originalname).toLowerCase();
+  if (!DRAWING_EXTENSIONS.includes(ext)) {
+    return cb(new Error('不支持的图纸格式，仅支持 DWG/DXF/STEP/STP'));
+  }
+  cb(null, true);
+};
+
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     cb(null, uploadsDir);
@@ -20,7 +30,7 @@ const storage = multer.diskStorage({
   }
 });
 
-const upload = multer({ storage });
+const upload = multer({ storage, fileFilter });
 
 router.post('/drawing', upload.single('drawing'), (req, res) => {
   if (!req.file) {
@@ -33,6 +43,11 @@ router.post('/drawing', upload.single('drawing'), (req, res) => {
     path: req.file.path,
     size: req.file.size
   });
+});
+
+// multer fileFilter 抛错时返回 400 而非 500
+router.use((err, req, res, next) => {
+  res.status(400).json({ error: err.message || '上传失败' });
 });
 
 module.exports = router;

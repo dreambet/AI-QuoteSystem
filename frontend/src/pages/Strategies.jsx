@@ -25,14 +25,6 @@ const fmt = (v, key) => {
   return v == null ? '-' : (percent ? `${Number(v) * 100}%` : `${Number(v)}`);
 };
 
-const modalStyle = {
-  position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%,-50%)',
-  background: '#fff', borderRadius: 12, padding: 24, width: '90%', maxWidth: 640,
-  maxHeight: '85vh', overflow: 'auto', boxShadow: '0 20px 60px rgba(0,0,0,0.3)', zIndex: 1001
-};
-const fieldLabelStyle = { display: 'block', fontSize: 13, color: '#666', marginBottom: 4 };
-const inputStyle = { width: '100%', padding: '8px', borderRadius: 6, border: '1px solid #ddd', boxSizing: 'border-box' };
-
 function Strategies() {
   const [strategies, setStrategies] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -40,6 +32,7 @@ function Strategies() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [confirmDelete, setConfirmDelete] = useState(null);
+  const [deleting, setDeleting] = useState(false);
 
   const load = () => {
     setLoading(true);
@@ -49,6 +42,23 @@ function Strategies() {
       .finally(() => setLoading(false));
   };
   useEffect(() => { load(); }, []);
+
+  const anyModalOpen = modal.open || !!confirmDelete;
+
+  // 弹窗打开时锁定背景滚动 + Esc 关闭
+  useEffect(() => {
+    if (!anyModalOpen) return;
+    document.body.style.overflow = 'hidden';
+    const onKey = (e) => {
+      if (e.key === 'Escape') {
+        if (saving || deleting) return;
+        setConfirmDelete(null);
+        setModal(m => ({ ...m, open: false }));
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => { document.body.style.overflow = ''; window.removeEventListener('keydown', onKey); };
+  }, [anyModalOpen, saving, deleting]);
 
   const openCreate = () => {
     setError('');
@@ -60,12 +70,13 @@ function Strategies() {
     RATE_FIELDS.forEach(({ key, percent }) => { f[key] = toDisplay(s[key], percent); });
     setModal({ open: true, mode: 'edit', editingId: s.id, form: f });
   };
-  const closeModal = () => setModal(m => ({ ...m, open: false }));
+  const closeModal = () => { if (saving) return; setModal(m => ({ ...m, open: false })); };
   const setField = (k, v) => setModal(m => ({ ...m, form: { ...m.form, [k]: v } }));
 
-  const submit = async () => {
+  const submit = async (e) => {
+    e.preventDefault();
     const f = modal.form;
-    if (!f.name.trim()) { setError('策略名称 name 必填'); return; }
+    if (!f.name.trim()) { setError('策略名称必填，且需与现有策略不重复'); return; }
     setSaving(true); setError('');
     try {
       const payload = {
@@ -82,16 +93,17 @@ function Strategies() {
         if (!modal.editingId) throw new Error('未找到原策略');
         await catalogApi.updateStrategy(modal.editingId, payload);
       }
-      closeModal();
+      setModal(m => ({ ...m, open: false }));
       load();
-    } catch (e) {
-      setError(e.response?.data?.error || e.message || '保存失败');
+    } catch (err) {
+      setError(err.response?.data?.error || err.message || '保存失败');
     } finally {
       setSaving(false);
     }
   };
 
   const remove = async (s) => {
+    setDeleting(true);
     try {
       await catalogApi.deleteStrategy(s.id);
       setConfirmDelete(null);
@@ -99,6 +111,8 @@ function Strategies() {
     } catch (e) {
       setError(e.response?.data?.error || e.message || '删除失败');
       setConfirmDelete(null);
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -122,62 +136,76 @@ function Strategies() {
             <td>{fmt(s.toolLossRate, 'toolLossRate')}</td>
             <td>{fmt(s.setupFeeDefault, 'setupFeeDefault')}</td>
             <td>
-              <button type="button" className="table-view-link" onClick={() => openEdit(s)}>编辑</button>
-              <button type="button" className="table-view-link" style={{ marginLeft: 8, color: '#c62828' }} onClick={() => setConfirmDelete(s)}>删除</button>
+              <div className="table-action-group">
+                <button type="button" className="table-action-btn" onClick={() => openEdit(s)}>✎ 编辑</button>
+                <button type="button" className="table-action-btn table-action-danger" onClick={() => setConfirmDelete(s)}>✕ 删除</button>
+              </div>
             </td>
           </tr>)}</tbody>
         </table></div>
       ) : <div className="console-empty">暂无策略，点击"新建策略"创建。</div>}
     </section>
 
-    {error && <div style={{ color: '#c62828', margin: '0 24px 12px' }}>{error}</div>}
+    {error && !modal.open && !confirmDelete && (
+      <div className="console-error" style={{ margin: '0 24px 12px' }}>{error}<button type="button" onClick={() => setError(null)}>×</button></div>
+    )}
 
     {modal.open && (
-      <div className="trace-drawer-mask" onClick={closeModal}>
-        <div style={modalStyle} onClick={e => e.stopPropagation()}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-            <h3 style={{ margin: 0 }}>{modal.mode === 'create' ? '新建成本策略' : '编辑策略'}</h3>
-            <button type="button" onClick={closeModal} style={{ border: 'none', background: 'none', fontSize: 22, cursor: 'pointer', lineHeight: 1 }}>×</button>
-          </div>
-          <div style={{ display: 'grid', gap: 12 }}>
-            <label>
-              <span style={fieldLabelStyle}>策略名称 name（唯一）</span>
-              <input value={modal.form.name} onChange={e => setField('name', e.target.value)} placeholder="如 成本策略F" style={inputStyle} />
-            </label>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-              {RATE_FIELDS.map(({ key, label, step, hint, percent }) => (
-                <label key={key}>
-                  <span style={fieldLabelStyle}>{label}{percent && ' (%)'}</span>
-                  <input type="number" step={step} value={modal.form[key]} onChange={e => setField(key, e.target.value)} placeholder={hint} style={inputStyle} />
-                </label>
-              ))}
+      <div className="console-modal-mask" onClick={closeModal}>
+        <form className="console-modal strategy-modal" onClick={e => e.stopPropagation()} onSubmit={submit}>
+          <div className="console-modal-head">
+            <div>
+              <span>{modal.mode === 'create' ? '新建成本策略' : `编辑策略 · ${modal.form.name || ''}`}</span>
+              <small>名称唯一；百分率按百分数填写（如 10 即 10%），保存时自动转小数存储，直接参与报价计算</small>
             </div>
-            <label>
-              <span style={fieldLabelStyle}>变更原因（选填）</span>
-              <input value={modal.form.changeReason} onChange={e => setField('changeReason', e.target.value)} placeholder="如 新增量产产品策略" style={inputStyle} />
-            </label>
-            {error && <div style={{ color: '#c62828', fontSize: 13 }}>{error}</div>}
-            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 4 }}>
+            <button type="button" onClick={closeModal} aria-label="关闭">×</button>
+          </div>
+          <div className="console-modal-body">
+            <div className="strategy-form">
+              <label className="strategy-form-name">策略名称（唯一）
+                <input autoFocus value={modal.form.name} onChange={e => setField('name', e.target.value)} placeholder="如 成本策略F" maxLength={50} />
+              </label>
+              <div className="strategy-form-grid">
+                {RATE_FIELDS.map(({ key, label, step, hint, percent }) => (
+                  <label key={key}>{label}{percent ? ' (%)' : ''}
+                    <input type="number" step={step} value={modal.form[key]} onChange={e => setField(key, e.target.value)} placeholder={hint} />
+                  </label>
+                ))}
+              </div>
+              <label className="strategy-form-name">变更原因（选填）
+                <input value={modal.form.changeReason} onChange={e => setField('changeReason', e.target.value)} placeholder={modal.mode === 'create' ? '如 新增量产产品策略' : '如 4月起管销率下调'} maxLength={100} />
+              </label>
+              {error && <p className="strategy-form-error">{error}</p>}
+            </div>
+          </div>
+          <div className="console-modal-foot">
+            <span className="console-modal-hint">{modal.mode === 'create' ? '保存后即可在报价工作台第3步选用' : '修改将记录变更原因；历史报价按率值快照不受影响'}</span>
+            <div className="console-modal-ops">
               <button type="button" className="secondary-action" onClick={closeModal}>取消</button>
-              <button type="button" className="primary-action" onClick={submit} disabled={saving}>{saving ? '保存中…' : '保存'}</button>
+              <button type="submit" className="primary-action" disabled={saving}>{saving ? '保存中…' : '保存'}</button>
             </div>
           </div>
-        </div>
+        </form>
       </div>
     )}
 
     {confirmDelete && (
-      <div className="trace-drawer-mask" onClick={() => setConfirmDelete(null)}>
-        <div style={{ ...modalStyle, maxWidth: 420 }} onClick={e => e.stopPropagation()}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-            <h3 style={{ margin: 0 }}>删除策略</h3>
-            <button type="button" onClick={() => setConfirmDelete(null)} style={{ border: 'none', background: 'none', fontSize: 22, cursor: 'pointer', lineHeight: 1 }}>×</button>
+      <div className="console-modal-mask" onClick={() => !deleting && setConfirmDelete(null)}>
+        <div className="console-modal strategy-modal strategy-confirm" onClick={e => e.stopPropagation()}>
+          <div className="console-modal-head">
+            <div><span>删除策略</span><small>此操作不可撤销，请确认后继续</small></div>
+            <button type="button" onClick={() => !deleting && setConfirmDelete(null)} aria-label="关闭">×</button>
           </div>
-          <p>确定删除 <strong>{confirmDelete.name}</strong> 吗？</p>
-          <p style={{ color: '#666', fontSize: 13, marginTop: 8 }}>已有报价的 processSnapshot 存了完整率值快照，删除策略不影响历史报价的重算与展示。</p>
-          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
-            <button type="button" className="secondary-action" onClick={() => setConfirmDelete(null)}>取消</button>
-            <button type="button" className="primary-action" onClick={() => remove(confirmDelete)}>确认删除</button>
+          <div className="console-modal-body strategy-confirm-body">
+            <p>确定删除策略 <strong>{confirmDelete.name}</strong> 吗？</p>
+            <p className="strategy-confirm-note">已有报价的成本策略不影响历史报价的重算与展示；但进行中的报价若未选中该策略以外的策略，计算时将回退到剩余策略中的第一条。</p>
+          </div>
+          <div className="console-modal-foot">
+            <span className="console-modal-hint">如策略仍在使用，建议先在报价工作台确认依赖</span>
+            <div className="console-modal-ops">
+              <button type="button" className="secondary-action" disabled={deleting} onClick={() => setConfirmDelete(null)}>取消</button>
+              <button type="button" className="danger-action" disabled={deleting} onClick={() => remove(confirmDelete)}>{deleting ? '删除中…' : '确认删除'}</button>
+            </div>
           </div>
         </div>
       </div>
