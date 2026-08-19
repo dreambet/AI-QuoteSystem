@@ -499,6 +499,48 @@ router.post('/:id/analyze-drawing', uploadDrawing.single('drawing'), async (req,
   }
 });
 
+// ---------- AI 报价建议共享逻辑 ----------
+// AI 输入 = 图纸解析摘要 + 人工确认的材料/产品规格（料长/料宽/料厚/步距/内外径/毛重/净重等）。
+// 单价快照 priceSnapshot 不发送，材料单价不可上传给 AI。
+// 特征全量列表（可达80+条/16KB+）压缩为分类计数+有限明细，输入 token 是 LLM 响应时长的主要成分。
+function buildAiQuotePayload(quote) {
+  const da = quote.drawingAnalysis || {};
+  const features = Array.isArray(da.features) ? da.features : [];
+  const featureSummary = {};
+  features.forEach(f => { const key = f.type || '其他'; featureSummary[key] = (featureSummary[key] || 0) + 1; });
+  return {
+    partName: da.partName || quote.partName,
+    material: da.material || quote.material,
+    dimensions: da.dimensions,
+    quantity: quote.quantity,
+    materialCode: quote.materialCode,
+    grossWeight: quote.grossWeight,
+    netWeight: quote.netWeight,
+    materialSpec: quote.blankSpec || {},
+    productSpec: quote.finishedSpec || {},
+    globalTolerance: da.globalTolerance || null,
+    featureSummary,
+    featureDetails: features.slice(0, 15).map(f => [f.type, f.description].filter(Boolean).join(' ')),
+    notes: da.notes
+  };
+}
+
+// 落库 AI 分析结果（复用第3步已算的 calculation，缺失则从 processSnapshot 重算）
+async function persistAiQuote(quote, aiAnalysis) {
+  let calculation = quote.calculation;
+  if (!calculation && quote.processSnapshot) {
+    const ps = quote.processSnapshot;
+    calculation = QuoteCalculator.calculate(
+      { grossWeight: quote.grossWeight, netWeight: quote.netWeight, quantity: quote.quantity },
+      { processSelection: ps.processSelection, strategy: ps.strategy, unitPrice: quote.priceSnapshot && quote.priceSnapshot.unitPrice, setupFee: ps.strategy && ps.strategy.setupFee }
+    );
+  }
+  const updateData = { aiQuoteAnalysis: aiAnalysis, status: 'ai_quoted' };
+  if (calculation) updateData.calculation = calculation;
+  const updatedQuote = await Quote.update(quote.id, updateData);
+  return { calculation, updatedQuote };
+}
+
 router.post('/:id/ai-quote', async (req, res) => {
   try {
     const quote = await Quote.findById(req.params.id);
@@ -506,7 +548,7 @@ router.post('/:id/ai-quote', async (req, res) => {
       return res.status(404).json({ error: 'Quote not found' });
     }
 
-    const quoteData = quote.drawingAnalysis || quote;
+    const quoteData = buildAiQuotePayload(quote);
     let aiAnalysis;
 
     try {
@@ -527,18 +569,7 @@ router.post('/:id/ai-quote', async (req, res) => {
       };
     }
 
-    // 复用第3步已计算的结果；若缺失则从 processSnapshot 重算
-    let calculation = quote.calculation;
-    if (!calculation && quote.processSnapshot) {
-      const ps = quote.processSnapshot;
-      calculation = QuoteCalculator.calculate(
-        { grossWeight: quote.grossWeight, netWeight: quote.netWeight, quantity: quote.quantity },
-        { processSelection: ps.processSelection, strategy: ps.strategy, unitPrice: quote.priceSnapshot && quote.priceSnapshot.unitPrice, setupFee: ps.strategy && ps.strategy.setupFee }
-      );
-    }
-    const updateData = { aiQuoteAnalysis: aiAnalysis, status: 'ai_quoted' };
-    if (calculation) updateData.calculation = calculation;
-    const updatedQuote = await Quote.update(req.params.id, updateData);
+    const { calculation, updatedQuote } = await persistAiQuote(quote, aiAnalysis);
 
     res.json({
       success: true,
@@ -554,6 +585,57 @@ router.post('/:id/ai-quote', async (req, res) => {
       message: 'AI报价失败'
     });
   }
+});
+
+// 流式 AI 报价建议：SSE 转发增量文本（delta），流结束后解析落库并回传权威状态（done）。
+// 客户端断开即中止上游生成，不浪费 token；失败时前端降级走非流式 /ai-quote。
+router.post('/:id/ai-quote/stream', async (req, res) => {
+  const sse = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders && res.flushHeaders();
+
+  let quote;
+  try {
+    quote = await Quote.findById(req.params.id);
+    if (!quote) {
+      sse('error', { message: 'Quote not found' });
+      return res.end();
+    }
+    sse('meta', { quoteId: quote.id });
+  } catch (error) {
+    sse('error', { message: error.message });
+    return res.end();
+  }
+
+  // 客户端断开 -> 中止上游 LLM 生成
+  const abort = new AbortController();
+  let clientClosed = false;
+  req.on('close', () => {
+    clientClosed = true;
+    abort.abort();
+  });
+
+  try {
+    const quoteData = buildAiQuotePayload(quote);
+    const aiAnalysis = await DeepSeekService.analyzeQuoteWithAIStream(quoteData, {
+      signal: abort.signal,
+      onDelta: (t, kind) => { if (!clientClosed) sse('delta', { t, kind }); }
+    });
+    if (clientClosed) return;
+
+    const { calculation, updatedQuote } = await persistAiQuote(quote, aiAnalysis);
+    // 响应瘦身：updatedQuote 里的 drawingAnalysis 可能数百 KB，流式场景前端已有，剔除
+    const { drawingAnalysis: _skip, ...slimQuote } = updatedQuote || {};
+    sse('done', { aiAnalysis, calculation, quote: slimQuote });
+  } catch (error) {
+    if (clientClosed) return;
+    console.error('AI流式报价失败:', error.message);
+    sse('error', { message: error.message || 'AI流式报价失败' });
+  }
+  res.end();
 });
 
 router.get('/:id/3d-model', async (req, res) => {

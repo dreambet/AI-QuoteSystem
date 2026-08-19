@@ -1597,6 +1597,32 @@ function FeatureReviewWorkspace({ quoteId, formData, quote, analysisResult, sele
 }
 
 // 默认规格骨架：新建/恢复流程共用，保证键完整
+// 流式增量解析：从尚未生成完的 AI JSON 文本中提取"已闭合"的顶层字段，
+// 供第5步流式呈现阶段分区渲染（卡片逐个从骨架变实体）。
+const extractStreamingSections = text => {
+  const t = String(text || '').replace(/```(?:json)?/gi, '');
+  const sections = { materialRecommendation: '', processSuggestions: [], warningPoints: [], suggestions: [] };
+  const m = t.match(/"materialRecommendation"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  if (m) { try { sections.materialRecommendation = JSON.parse(`"${m[1]}"`); } catch (_) { /* 未闭合/非法则跳过 */ } }
+  // 对象数组（工艺建议）：提取已闭合的扁平对象
+  const am = t.match(/"processSuggestions"\s*:\s*\[([\s\S]*?)(\]|$)/);
+  if (am) {
+    sections.processSuggestions = (am[1].match(/\{[^{}]*\}/g) || [])
+      .map(s => { try { return JSON.parse(s); } catch (_) { return null; } })
+      .filter(Boolean);
+  }
+  // 字符串数组（风险/优化建议）：提取已闭合的字符串项
+  for (const key of ['warningPoints', 'suggestions']) {
+    const sm = t.match(new RegExp(`"${key}"\\s*:\\s*\\[([\\s\\S]*?)(\\]|$)`));
+    if (sm) {
+      sections[key] = (sm[1].match(/"((?:[^"\\]|\\.)*)"/g) || [])
+        .map(s => { try { return JSON.parse(s); } catch (_) { return null; } })
+        .filter(Boolean);
+    }
+  }
+  return sections;
+};
+
 const DEFAULT_BLANK_SPEC = { '材质': '', '料长': '', '步距': '', '料宽': '', '外径': '', '内径': '', '料厚': '', '毛重': '', 'MOQ': '' };
 const DEFAULT_FINISHED_SPEC = { '料长': '', '料宽': '', '外径': '', '料厚': '', '净重': '' };
 // 工作台会话键：报价未走完离开页面后，返回时按 quoteId 断点续走
@@ -1615,6 +1641,24 @@ function AIQuoteCreation() {
   const [catalog, setCatalog] = useState({ materials: [], processes: [], strategies: [] });
   const [processInputs, setProcessInputs] = useState({});
   const [processModalOpen, setProcessModalOpen] = useState(false);
+  // AI 报价建议流式生成状态：null=非流式/已完成；{ active, text, reasoning }=正在流式生成
+  // text=正文增量（用于卡片分区渲染），reasoning=模型思考过程增量（用于即时反馈）
+  const [aiStream, setAiStream] = useState(null);
+  const aiStreamAbortRef = useRef(null);
+  // 思考过程面板：完整内容展示 + 自动吸底（此前用 slice(-800) 滑动窗口导致内容回退跳变）
+  const reasoningPreRef = useRef(null);
+  const reasoningStickRef = useRef(true);
+  useEffect(() => {
+    const el = reasoningPreRef.current;
+    if (el && reasoningStickRef.current) el.scrollTop = el.scrollHeight;
+  }, [aiStream && aiStream.reasoning]);
+  const handleReasoningScroll = () => {
+    const el = reasoningPreRef.current;
+    if (!el) return;
+    reasoningStickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 30;
+  };
+  // 组件卸载（跳转详情/列表页）时中止进行中的流式生成
+  useEffect(() => () => { if (aiStreamAbortRef.current) aiStreamAbortRef.current.abort(); }, []);
   const [formData, setFormData] = useState({
     partName: '', materialCode: '', partDescription: '', material: '',
     quantity: '',
@@ -1679,7 +1723,13 @@ function AIQuoteCreation() {
   const handleFormChange = (event) => setFormData(data => ({ ...data, [event.target.name]: event.target.value }));
   const handleSpecChange = (type, key, value) => setFormData(data => {
     const fieldKey = type === 'blank' ? 'blankSpec' : 'finishedSpec';
-    return { ...data, [fieldKey]: { ...data[fieldKey], [key]: value } };
+    const next = { ...data, [fieldKey]: { ...data[fieldKey], [key]: value } };
+    // 报价数量以 MOQ 为准：填写 MOQ 即联动数量；清空/非法则回落 1
+    if (type === 'blank' && key === 'MOQ') {
+      const moq = parseFloat(value);
+      next.quantity = Number.isFinite(moq) && moq > 0 ? String(Math.floor(moq)) : '1';
+    }
+    return next;
   });
   // 材质选择：选已有 -> 同步 formData.material 与 blankSpec.材质；选"新增" -> 弹窗录入并自动入库
   const handleMaterialChange = async (value) => {
@@ -1769,9 +1819,12 @@ function AIQuoteCreation() {
     try {
       const grossWeight = num(formData.blankSpec?.['毛重']);
       const netWeight = num(formData.finishedSpec?.['净重']);
+      // 报价数量 = MOQ 优先：填了 MOQ 按 MOQ 计，未填默认 1
+      const moq = num(formData.blankSpec?.['MOQ']);
+      const quantity = moq > 0 ? Math.floor(moq) : (num(formData.quantity) || 1);
       await quoteApi.update(quoteId, {
         partName: formData.partName, materialCode: formData.materialCode, partDescription: formData.partDescription, material: formData.material,
-        quantity: num(formData.quantity) || 1,
+        quantity,
         grossWeight, netWeight,
         blankSpec: formData.blankSpec, finishedSpec: formData.finishedSpec
       });
@@ -1795,13 +1848,60 @@ function AIQuoteCreation() {
   };
   const requestAiQuote = async () => {
     setLoading(true); setError(null);
-    try { const response = await quoteApi.aiQuote(quoteId, { useAnalysisData: true }); setQuote(response.data.quote); setAnalysisResult(result => ({ ...(result || {}), aiQuotation: response.data.aiAnalysis })); setStep(5); } catch (err) { setError(err.response?.data?.error || 'AI 报价分析失败'); } finally { setLoading(false); }
+    // 流式：立即进入第5步看 AI 逐字生成；失败降级非流式；返回上一步可取消
+    const controller = new AbortController();
+    aiStreamAbortRef.current = controller;
+    setAiStream({ active: true, text: '' });
+    setStep(5);
+    const applyResult = (data) => {
+      setQuote(data.quote);
+      setAnalysisResult(result => ({ ...(result || {}), aiQuotation: data.aiAnalysis }));
+      setAiStream(null);
+    };
+    let gotDone = false;
+    try {
+      await quoteApi.aiQuoteStream(quoteId, {
+        onDelta: (t, kind) => setAiStream(s => (s ? (kind === 'reasoning' ? { ...s, reasoning: (s.reasoning || '') + t } : { ...s, text: s.text + t }) : s)),
+        onDone: data => { gotDone = true; applyResult(data); },
+        onError: () => { /* 交给流结束后的降级逻辑 */ }
+      }, controller.signal);
+      if (gotDone) return;
+      throw new Error('流式结果不完整');
+    } catch (err) {
+      if (controller.signal.aborted) { setAiStream(null); return; } // 用户取消，不降级
+      // 降级：改走非流式接口
+      try {
+        const response = await quoteApi.aiQuote(quoteId, { useAnalysisData: true });
+        applyResult(response.data);
+      } catch (err2) {
+        setError(err2.response?.data?.error || 'AI 报价分析失败');
+        setAiStream(null);
+      }
+    } finally { setLoading(false); }
   };
+  // 流式生成中返回上一步 = 取消生成（后端同步中止上游，不浪费 token）
+  const abortAiStream = () => { if (aiStreamAbortRef.current) aiStreamAbortRef.current.abort(); setAiStream(null); setStep(4); };
 
   const renderStep1 = () => <div className="step-workspace"><WorkspaceTitle eyebrow="STEP 01 / INTAKE" title="上传机加工图纸" description="先选择图纸建立任务；材料规格、产品规格与工序将在第3步参照解析结果确认。" badge="支持 DWG · DXF · STEP · STP" /><div className="intake-grid intake-single"><section className={`drop-zone ${dragActive ? 'dragging' : ''}`} onDragOver={event => { event.preventDefault(); setDragActive(true); }} onDragLeave={() => setDragActive(false)} onDrop={event => { event.preventDefault(); setDragActive(false); chooseFile(event.dataTransfer.files?.[0]); }}><span className="drop-zone-orbit" /><div className="drop-zone-icon">CAD</div><h3>{selectedFile ? selectedFile.name : '拖拽图纸到此处'}</h3><p>{selectedFile ? `${(selectedFile.size / 1024 / 1024).toFixed(2)} MB · 等待建立分析任务` : '或从本地选择文件。二维图纸与三维模型均可解析。'}</p><label className="secondary-action file-picker">选择图纸<input type="file" accept=".dwg,.dxf,.step,.stp" onChange={event => chooseFile(event.target.files?.[0])} /></label><div className="format-chips"><span>DWG</span><span>DXF</span><span>STEP</span><span>STP</span></div></section><div className="workspace-actions"><button type="button" className="primary-action" onClick={createQuote} disabled={loading}>{loading ? '正在建立任务…' : '建立分析任务'}</button></div></div></div>;
   const renderStep2 = () => <div className="step-workspace"><WorkspaceTitle eyebrow="STEP 02 / AI PARSING" title="智能解析 CAD 图纸" description="系统会识别几何轮廓、尺寸、特征与模型来源，并准备进入人工复核。" badge={fileExtension(quote?.drawingPath)} /><div className="analysis-command"><div className="command-orb">AI</div><div><span className="eyebrow">READY TO ANALYZE</span><h3>{fileName(quote?.drawingPath)}</h3><p>已建立零件任务。开始分析后，系统将提取几何信息并生成特征确认视图。</p></div><button type="button" className="primary-action" onClick={analyzeDrawing} disabled={loading}>{loading ? '正在解析…' : '开始 AI 分析'}</button></div><div className="status-card-grid"><div><span>输入格式</span><strong>{fileExtension(quote?.drawingPath)}</strong><small>CAD 文件已就绪</small></div><div><span>解析范围</span><strong>几何 + 特征</strong><small>尺寸、轮廓、孔位</small></div><div><span>下一节点</span><strong>人工确认</strong><small>进入三维模型复核</small></div></div><div className="workspace-actions"><button type="button" className="secondary-action" onClick={() => setStep(1)}>返回上传</button></div></div>;
   const renderStep4 = () => { const calc = quote?.calculation; const costs = [['材料成本 K', calc?.materialCost], ['机加工成本 R', calc?.machiningCost], ['管销 S', calc?.overhead], ['小计 T', calc?.subtotal], ['利润 U', calc?.profit], ['含税 V', calc?.taxIncluded], ['样品价 W', calc?.samplePrice], ['调机费', calc?.setupFee]]; return <div className="step-workspace"><WorkspaceTitle eyebrow="STEP 04 / PRICING" title="报价成本计算结果" description="费用按 K→R→S→T→U→V→W 公式链生成，可返回第3步调整工序与单价。" badge={calc ? '报价已计算' : '等待计算'} />{calc ? <><div className="quote-result-hero"><div><span>参考总价</span><strong>{money(calc.total)}</strong><small>单价 {money(calc.unitPrice)} · 数量 {formData.quantity}</small></div><span>CALCULATED</span></div><div className="cost-card-grid">{costs.map(([label, value]) => <div key={label}><span>{label}</span><strong>{money(value)}</strong></div>)}</div><div className="workspace-actions"><button type="button" className="secondary-action" onClick={() => setStep(3)}>返回修改参数</button><button type="button" className="primary-action" onClick={requestAiQuote} disabled={loading}>{loading ? 'AI 分析中…' : '生成 AI 报价建议'}</button></div></> : <div className="console-empty">尚未取得报价结果，请先完成特征确认。</div>}</div>; };
-  const renderStep5 = () => { const ai = analysisResult?.aiQuotation; const groups = [['材料推荐', ai?.materialRecommendation ? [ai.materialRecommendation] : []], ['工艺建议', ai?.processSuggestions?.map(item => `${item.process || item.name}：${item.reason}`) || []], ['风险提示', ai?.warningPoints || []], ['优化建议', ai?.suggestions || []]]; return <div className="step-workspace"><WorkspaceTitle eyebrow="STEP 05 / DELIVERY" title="报价交付与 AI 建议" description="汇总报价结论、工艺判断和关键风险，支持返回任意已完成步骤复核。" badge="交付就绪" /><div className="delivery-total"><span>最终参考报价</span><strong>{money(quote?.calculation?.total)}</strong><small>{formData.partName || '未命名零件'} · {formData.material} · {formData.quantity} 件</small></div><div className="advice-grid">{groups.map(([title, items]) => <section key={title}><h3>{title}</h3>{items.length ? <ul>{items.map((item, index) => <li key={index}>{item}</li>)}</ul> : <p>暂无额外建议。</p>}</section>)}</div><div className="workspace-actions"><button type="button" className="secondary-action" onClick={() => setStep(4)}>返回报价计算</button><Link className="primary-action link-action" to={`/quotes/${quoteId}`}>查看报价详情</Link><Link className="secondary-action link-action" to="/quotes">返回报价列表</Link></div></div>; };
+  const renderStep5 = () => {
+    const ai = analysisResult?.aiQuotation;
+    // ---- 阶段一：流式生成中（骨架卡片 + 增量解析出的内容逐区长出） ----
+    if (aiStream?.active) {
+      const partial = extractStreamingSections(aiStream.text);
+      const streamGroups = [
+        ['材料推荐', partial.materialRecommendation ? [partial.materialRecommendation] : []],
+        ['工艺建议', partial.processSuggestions.map(item => `${item.process || item.name}：${item.reason}`)],
+        ['风险提示', partial.warningPoints],
+        ['优化建议', partial.suggestions]
+      ];
+      const reasoning = aiStream.reasoning || '';
+      return <div className="step-workspace"><WorkspaceTitle eyebrow="STEP 05 / DELIVERY" title="报价交付与 AI 建议" description="汇总报价结论、工艺判断和关键风险，支持返回任意已完成步骤复核。" badge="AI 生成中" /><div className="delivery-total"><span>最终参考报价</span><strong>{money(quote?.calculation?.total)}</strong><small>{formData.partName || '未命名零件'} · {formData.material} · {formData.quantity} 件</small></div><div className="stream-status"><span className="stream-dot" />{aiStream.text.length ? `AI 正在生成建议 · 已输出 ${aiStream.text.length} 字` : `AI 正在推理分析 · 已思考 ${reasoning.length} 字`}</div>{reasoning && !aiStream.text && <details className="stream-reasoning" open><summary>思考过程（实时）</summary><pre ref={reasoningPreRef} onScroll={handleReasoningScroll}>{reasoning}</pre></details>}<div className="advice-grid">{streamGroups.map(([title, items]) => <section key={title} className={items.length ? 'advice-live' : 'advice-pending'}><h3>{title}</h3>{items.length ? <ul>{items.map((item, index) => <li key={index}>{item}</li>)}</ul> : <><div className="skeleton-line" /><div className="skeleton-line" style={{ width: '72%' }} /><div className="skeleton-line" style={{ width: '45%' }} /></>}</section>)}</div><div className="workspace-actions"><button type="button" className="secondary-action" onClick={abortAiStream}>取消并返回</button></div></div>;
+    }
+    // ---- 阶段二：生成完成（done 事件权威数据） ----
+    const groups = [['材料推荐', ai?.materialRecommendation ? [ai.materialRecommendation] : []], ['工艺建议', ai?.processSuggestions?.map(item => `${item.process || item.name}：${item.reason}`) || []], ['风险提示', ai?.warningPoints || []], ['优化建议', ai?.suggestions || []]]; return <div className="step-workspace"><WorkspaceTitle eyebrow="STEP 05 / DELIVERY" title="报价交付与 AI 建议" description="汇总报价结论、工艺判断和关键风险，支持返回任意已完成步骤复核。" badge="交付就绪" /><div className="delivery-total"><span>最终参考报价</span><strong>{money(quote?.calculation?.total)}</strong><small>{formData.partName || '未命名零件'} · {formData.material} · {formData.quantity} 件</small></div><div className="advice-grid">{groups.map(([title, items]) => <section key={title}><h3>{title}</h3>{items.length ? <ul>{items.map((item, index) => <li key={index}>{item}</li>)}</ul> : <p>暂无额外建议。</p>}</section>)}</div><div className="workspace-actions"><button type="button" className="secondary-action" onClick={() => setStep(4)}>返回报价计算</button><Link className="primary-action link-action" to={`/quotes/${quoteId}`}>查看报价详情</Link><Link className="secondary-action link-action" to="/quotes">返回报价列表</Link></div></div>;
+  };
   const mainContent = step === 1 ? renderStep1() : step === 2 ? renderStep2() : step === 3 ? <FeatureReviewWorkspace quoteId={quoteId} formData={formData} quote={quote} analysisResult={analysisResult} selectedFeatureIndex={selectedFeatureIndex} onSelectFeature={setSelectedFeatureIndex} onChange={handleFormChange} onSpecChange={handleSpecChange} onMaterialChange={handleMaterialChange} catalog={catalog} processInputs={processInputs} onProcessInput={onProcessInput} onToggleProcess={onToggleProcess} onEditProcessRate={onEditProcessRate} onOpenProcess={() => setProcessModalOpen(true)} onBack={() => setStep(2)} onCalculate={calculateQuote} loading={loading} /> : step === 4 ? renderStep4() : renderStep5();
   const context = step === 3 ? (analysisResult?.features || []).length : step >= 4 ? money(quote?.calculation?.total) : quote ? fileExtension(quote.drawingPath) : '等待输入';
   return <div className="ai-quote-page"><main className="cad-console"><header className="console-hero"><div><span className="eyebrow">CAD INTELLIGENCE / QUOTATION WORKBENCH</span><h1>机加工模型分析工作台</h1><p>从图纸解析到报价交付，在同一个精密制造工作台内完成。</p></div><div className="console-hero-status"><span>{quote ? '任务进行中' : '新建任务'}</span><span>{fileExtension(quote?.drawingPath || selectedFile?.name)}</span><span>360° 预览</span></div></header><div className={`console-layout${step === 3 ? ' step3-full' : ''}`}><aside className="workflow-rail"><div className="rail-heading"><span>ANALYSIS FLOW</span><b>{step} / 5</b></div><nav>{WORKFLOW_STEPS.map(item => { const available = item.id <= completedStep; const state = item.id === step ? 'active' : item.id < step || (item.id < completedStep) ? 'done' : 'locked'; return <button key={item.id} type="button" className={`workflow-node ${state}`} disabled={!available} onClick={() => available && setStep(item.id)}><i>{state === 'done' ? '✓' : item.icon}</i><span><strong>{item.title}</strong><small>{item.subtitle}</small></span>{state === 'locked' && <em>LOCK</em>}</button>; })}</nav><div className="rail-footnote"><span>当前任务</span><strong>{quoteId ? `#${quoteId}` : '未创建'}</strong><small>后续步骤将在前置数据完成后自动解锁</small></div></aside><section className="console-main">{error && <div className="console-error">{error}<button type="button" onClick={() => setError(null)}>×</button></div>}{mainContent}</section>{step !== 3 && <aside className="context-rail"><div className="context-title"><span>任务摘要</span><b>LIVE</b></div><div className="context-file"><span className="context-file-type">{fileExtension(quote?.drawingPath || selectedFile?.name)}</span><small>当前图纸</small><strong>{fileName(quote?.drawingPath || selectedFile?.name)}</strong></div><div className="context-stat"><span>{step === 3 ? '识别特征' : step >= 4 ? '当前报价' : '任务状态'}</span><strong>{context}</strong><small>{step === 3 ? '可选择并定位' : step >= 4 ? '含成本构成' : quote ? '等待下一步操作' : '请上传图纸'}</small></div>{step >= 4 && <div className="context-list"><span>数据概览</span><p>物料描述 <strong>{formData.partDescription || '-'}</strong></p><p>材料 <strong>{formData.material || '-'}</strong></p><p>毛重 <strong>{formData.blankSpec?.['毛重'] || '-'}</strong></p><p>MOQ数量 <strong>{formData.blankSpec?.['MOQ'] || '-'}</strong></p></div>}<div className="context-tip"><span>操作提示</span><p>{step === 3 ? '在参数修正-基本信息中点击「工序确认」填写工序参数，填值即选中。' : step === 1 ? '优先上传 DWG、DXF、STEP 或 STP 文件，以获得更完整的解析结果。' : '完成当前任务后，下一阶段将在流程中自动解锁。'}</p></div></aside>}</div>{step === 3 && processModalOpen && <div className="console-modal-mask" onClick={() => setProcessModalOpen(false)}><div className="console-modal" onClick={event => event.stopPropagation()}><div className="console-modal-head"><div><span>工序确认</span><small>填加工时长 / 损耗率% / 单制程成本金额即选中对应工序，未填值不参与计算</small></div><button type="button" onClick={() => setProcessModalOpen(false)}>×</button></div><div className="console-modal-body"><ProcessConfirmPanel inModal catalog={catalog} processInputs={processInputs} onProcessInput={onProcessInput} onToggleProcess={onToggleProcess} onEditProcessRate={onEditProcessRate} netWeight={num((formData.finishedSpec || {})['净重'])} /></div><div className="console-modal-foot"><span className="console-modal-hint">阳极氧化按勾选：单价×净重；损耗率留空则沿用所选策略默认值。</span><button type="button" className="primary-action" onClick={() => setProcessModalOpen(false)}>完成确认</button></div></div></div>}</main></div>;

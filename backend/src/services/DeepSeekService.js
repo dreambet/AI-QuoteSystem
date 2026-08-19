@@ -9,20 +9,22 @@ class DeepSeekService {
     this.isConfigured = !!this.apiKey;
   }
 
-  async analyzeQuoteWithAI(quoteData) {
-    if (!this.isConfigured) {
-      return this.fallbackQuoteAnalysis(quoteData);
-    }
+  // 报价建议共享的消息构造（非流式/流式同一份 prompt，保证行为一致）
+  _quoteMessages(quoteData) {
+    return [
+      {
+        role: 'system',
+        content: `你是一个专业的机加工报价工程师。根据提供的零件参数，给出详细的报价分析建议。
 
-    try {
-      const response = await axios.post(
-        `${this.baseUrl}/chat/completions`,
-        {
-          model: this.model,
-          messages: [
-            {
-              role: 'system',
-              content: `你是一个专业的机加工报价工程师。根据提供的零件参数，给出详细的报价分析建议。
+输入数据说明：
+- materialSpec（材料规格/毛坯）与 productSpec（产品规格/成品）中的料长、料宽、料厚、步距、外径、内径、毛重、净重等是**人工确认后的准确值**，优先于图纸解析的 dimensions 估算值，请以它们为准。
+- grossWeight/netWeight 为确认后的毛重(kg)/净重(kg)；featureSummary 为图纸特征分类计数，featureDetails 为代表性特征明细。
+- 输入中不包含材料单价信息，请勿猜测或要求具体单价，报价判断基于几何、工序与重量。
+
+输出精简要求（用户在界面等待，务必控制篇幅）：
+- processSuggestions 最多5条，每条 reason 不超过40字
+- warningPoints、suggestions 各最多4条，每条一句话
+- priceAnalysis 各字段一句话
 
 请以JSON格式返回：
 {
@@ -45,17 +47,30 @@ class DeepSeekService {
 }
 
 请以JSON格式返回，使用中文。`
-            },
-            {
-              role: 'user',
-              content: `请分析以下机加工零件并给出报价建议：
+      },
+      {
+        role: 'user',
+        content: `请分析以下机加工零件并给出报价建议：
 
 零件信息：
 ${JSON.stringify(quoteData, null, 2)}`
-            }
-          ],
+      }
+    ];
+  }
+
+  async analyzeQuoteWithAI(quoteData) {
+    if (!this.isConfigured) {
+      return this.fallbackQuoteAnalysis(quoteData);
+    }
+
+    try {
+      const response = await axios.post(
+        `${this.baseUrl}/chat/completions`,
+        {
+          model: this.model,
+          messages: this._quoteMessages(quoteData),
           temperature: 0.7,
-          max_tokens: 4096,
+          max_tokens: 2500,
         },
         {
           headers: {
@@ -76,6 +91,79 @@ ${JSON.stringify(quoteData, null, 2)}`
     } catch (error) {
       console.error('DeepSeek报价分析失败:', error);
       return this.fallbackQuoteAnalysis(quoteData);
+    }
+  }
+
+  // 流式版：onDelta(text) 逐段回调增量文本；signal 用于客户端取消时中止上游生成。
+  // 返回值与非流式一致（解析后的结构体或 rawText 兜底）。
+  async analyzeQuoteWithAIStream(quoteData, { onDelta, signal } = {}) {
+    if (!this.isConfigured) {
+      return this.fallbackQuoteAnalysis(quoteData);
+    }
+
+    let response;
+    try {
+      response = await axios.post(
+        `${this.baseUrl}/chat/completions`,
+        {
+          model: this.model,
+          messages: this._quoteMessages(quoteData),
+          temperature: 0.7,
+          max_tokens: 2500,
+          stream: true
+        },
+        {
+          headers: {
+            'Authorization': `Bearer ${this.apiKey}`,
+            'Content-Type': 'application/json'
+          },
+          responseType: 'stream',
+          signal
+        }
+      );
+    } catch (error) {
+      if (error.code === 'ERR_CANCELED') throw error; // 客户端取消：向上抛，不落库
+      console.error('DeepSeek流式请求建立失败:', error.message);
+      return this.fallbackQuoteAnalysis(quoteData);
+    }
+
+    // SSE 行可能跨 chunk 断裂，按行缓冲解析
+    let full = '';
+    let buf = '';
+    try {
+      for await (const chunk of response.data) {
+        buf += chunk.toString();
+        let idx;
+        while ((idx = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, idx).trim();
+          buf = buf.slice(idx + 1);
+          if (!line.startsWith('data:')) continue;
+          const payload = line.slice(5).trim();
+          if (payload === '[DONE]') continue;
+          let json;
+          try { json = JSON.parse(payload); } catch (_) { continue; }
+          const delta = (json.choices && json.choices[0] && json.choices[0].delta) || {};
+          // 推理模型先流式输出思考过程（reasoning_content）再输出正文（content），
+          // 两者都回调（kind: 'reasoning' | 'content'），正文才累积参与最终解析
+          if (delta.reasoning_content) {
+            if (onDelta) onDelta(delta.reasoning_content, 'reasoning');
+          }
+          if (delta.content) {
+            full += delta.content;
+            if (onDelta) onDelta(delta.content, 'content');
+          }
+        }
+      }
+    } catch (error) {
+      if (error.code === 'ERR_CANCELED') throw error;
+      throw error; // 流中途异常向上抛，由路由发 error 事件并降级
+    }
+
+    try {
+      return this.parseJsonContent(full);
+    } catch (e) {
+      console.error('AI返回JSON解析失败(流式):', e.message);
+      return { rawText: full };
     }
   }
 
