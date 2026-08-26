@@ -62,6 +62,56 @@ class AIReviewer {
 
     return { status, comments, suggestions };
   }
+
+  /**
+   * 本地基线层（情形A：同 materialCode = 同产品的历次报价）。
+   * 所有涉价计算在此完成，输出只含枚举/倍数/工序名，供 LLM 语义层解读，不含价格数字。
+   * historyRows: 同 materialCode 历史报价（不含本次），按 updatedAt 倒序，最多5条。
+   */
+  static computeHistoryBaseline(quote, historyRows) {
+    if (!Array.isArray(historyRows) || !historyRows.length) {
+      return { firstQuote: true };
+    }
+    const baseline = { firstQuote: false, deviation: null, deviationLevel: null, processDiff: '', durationFlags: [] };
+
+    // 1) 单件价(W)偏离：与历史均值比较（等级输出给 LLM，倍数仅本地留存供前端展示）
+    const currentW = Number((quote.calculation && quote.calculation.unitPrice) || 0);
+    const histW = historyRows
+      .map(r => Number((r.calculation && r.calculation.unitPrice) || 0))
+      .filter(v => v > 0);
+    if (currentW > 0 && histW.length) {
+      const avg = histW.reduce((a, b) => a + b, 0) / histW.length;
+      const dev = Math.abs(currentW - avg) / avg;
+      baseline.deviationLevel = dev;
+      baseline.deviation = dev > 0.3 ? '高' : dev > 0.1 ? '偏高' : '正常';
+    }
+
+    // 2) 工序集合差异（对比最近一次报价）
+    const latest = historyRows[0];
+    const curNames = ((quote.processSnapshot && quote.processSnapshot.processSelection) || []).map(p => p.name);
+    const histNames = ((latest.processSnapshot && latest.processSnapshot.processSelection) || []).map(p => p.name);
+    const removed = histNames.filter(n => !curNames.includes(n));
+    const added = curNames.filter(n => !histNames.includes(n));
+    if (removed.length || added.length) {
+      baseline.processDiff = [
+        removed.length ? `较历史减少：${removed.join('、')}` : '',
+        added.length ? `较历史增加：${added.join('、')}` : ''
+      ].filter(Boolean).join('；');
+    }
+
+    // 3) 同工序时长倍数异常（对比最近一次，≥3倍或≤1/3 视为异常）
+    for (const cur of (quote.processSnapshot && quote.processSnapshot.processSelection) || []) {
+      if (cur.costType !== 'time' || !(cur.minutes > 0)) continue;
+      const hist = ((latest.processSnapshot && latest.processSnapshot.processSelection) || []).find(p => p.name === cur.name);
+      if (hist && hist.minutes > 0) {
+        const ratio = cur.minutes / hist.minutes;
+        if (ratio >= 3 || ratio <= 1 / 3) {
+          baseline.durationFlags.push({ process: cur.name, multiple: Math.round(ratio * 10) / 10 });
+        }
+      }
+    }
+    return baseline;
+  }
 }
 
 module.exports = AIReviewer;

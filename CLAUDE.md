@@ -18,7 +18,7 @@ npm install
 npm run dev          # nodemon 热重载，监听 src/，端口 3001
 npm start            # 生产启动（node src/server.js）
 npm run init-db      # 建表（ensureSchema，幂等）
-npm run seed         # 种子数据修复（产品5样品倍率/阳极unitRate/牌号占位价/策略改名A-E/删density/删无用列与表，幂等）
+npm run seed         # 种子数据修复（产品5样品倍率/阳极unitRate/牌号占位价/策略改名A-E/常用牌号密度预置/删无用列与表，幂等）
 npm run rebuild-db   # ⚠️ 破坏性：重建 schema，会清空报价数据
 ```
 
@@ -36,8 +36,8 @@ npm run build        # 生产构建到 build/
 ### 数据存储：MySQL 多表 + JSON 列
 `db.js` 用 `mysql2/promise` 连接池，`ensureSchema()` 建表。当前 **5 张表**：
 - `quotes`：报价主表，23 列。嵌套对象（`calculation`/`aiReview`/`manualReview`/`drawingAnalysis`/`aiQuoteAnalysis`/`blankSpec`/`finishedSpec`/`priceSnapshot`/`processSnapshot`）存为 LONGTEXT JSON 列，`db.parseRow` 读取时反序列化。`materialCode`/`grossWeight`/`netWeight`/`strategyVersionId`(BIGINT)/`finalUnitPrice` 为独立列；`id` 应用层生成。
-- `materials` + `material_prices`：材料牌号（S31603/S30408…）与带生效日期的单价历史（`status=active/historical`，`confirmedAt` 标记是否市场确认）。**materials 表已无 density 列**（密度参数不再使用）。
-- `processes`：19 道工序目录，`costType` ∈ `time|percentage|weight|manual`，分别带 `hourlyRate`/`unitRate`/`fixedAmount`。**已无 unit 列**。
+- `materials` + `material_prices`：材料牌号（S31603/S30408…）与带生效日期的单价历史（`status=active/historical`，`confirmedAt` 标记是否市场确认）。materials 带 `priceMode`（'weight'=元/kg | 'fixed'=直接价格，决定 K 的算法）与 `density`（g/cm³，第3步按尺寸自动算毛/净重用；PUT /materials/:id 维护）。
+- `processes`：19 道预置工序 + 用户自建工站（code `CUS-` 前缀，第3步弹窗内新增/改名/改费率/删除，全局共享），`costType` ∈ `time|percentage|weight|manual`，分别带 `hourlyRate`/`unitRate`/`fixedAmount`。删除为软删（`active=0`）。**已无 unit 列**。
 - `pricing_strategies`：报价策略，字段 `materialLossRate`/`toolLossRate`/`overheadRate`/`profitRate`/`taxRate`/`sampleMultiplier`/`setupFeeDefault` + `name`（唯一键）/`createdBy`/`changeReason`。预置 5 条（name `成本策略A..E`）。**已无 code 列**（原产品物码编码已删，改用 name 唯一识别）。
 
 > ⚠️ **`part_masters` 与 `quote_events` 表已删除**（seed.js DROP，A 类无用清理）。旧的 `quotes.customer/usageContext/quoteType/partNumber/length/width/height/diameter/moq/deliveryDate/precision`、`materials.specification/priceUnit/density`、`pricing_strategies.version/config/publishedAt/status/setupFeeMin/...` 等列也已删。前端表单里的 `length/width/height/diameter/precision` 只是 formData 状态，**不持久化到 quotes 表独立列**（CAD 尺寸预填到 `blankSpec`/`finishedSpec` JSON）。
@@ -50,7 +50,7 @@ npm run build        # 生产构建到 build/
 ### 成本计算公式（`QuoteCalculator.js`，按计算公式总结.md）
 确定性公式链，单输入单输出。签名 `QuoteCalculator.calculate(quote, options = {})`：
 ```
-K = 毛重 × 单价                      // 材料成本（未税）
+K = 毛重 × 单价                      // 材料成本（未税）；priceMode='fixed'（直接价格）时 K=单价本身
 Q_i(机加工) = 工费率/60 × 加工时长(分钟)   // 单制程成本
 R = Σ 机加工 Q                       // 机加工成本
 Q_损耗 = R × 损耗率（材料损耗/刀具损耗）
@@ -61,9 +61,12 @@ T = K + R + S + Σ附加Q               // 小计
 U = T × 利润率                       // 利润
 V = (T + U) × (1 + 税率)             // 含税成本
 W = V × 样品倍率                     // 样品价格（产品5倍率=1，W=V）
-总价 = W × 数量 + 打样调机费
+报价单价 = W ÷ 良率                   // 良率填了才生效（如 85% -> W/0.85），未填=W
+总价 = 报价单价 × 数量 + 打样调机费
 ```
-输出含 `materialCost/machiningCost/overhead/subtotal/profit/taxIncluded/samplePrice/setupFee/unitPrice/total` + `processes`/`additions` 明细 + `formulaTrace`（每步算式，供详情页/PDF 展示）。路由 `/:id/calculate` 收 `processSelection/unitPrice/strategyId/strategyOverrides/setupFee`，写 `calculation/priceSnapshot/processSnapshot/strategyVersionId`。
+输出含 `materialCost/machiningCost/overhead/subtotal/profit/taxIncluded/samplePrice/setupFee/unitPrice/total` + `processes`/`additions` 明细 + `formulaTrace`（每步算式，供详情页/PDF 展示；良率生效时含 `yieldAdjust` 条目）。路由 `/:id/calculate` 收 `processSelection/unitPrice/strategyId/strategyOverrides/setupFee/priceMode/yieldRate`，写 `calculation/priceSnapshot/processSnapshot/strategyVersionId`。
+
+材料计价方式 `priceMode`（materials 表列，'weight'=元/kg 默认 | 'fixed'=直接价格）：calculate 请求体优先，否则按 quote.material 查 materials 目录；快照存 `priceSnapshot.priceMode`。**毛重/净重自动计算**（纯前端，不经过后端）：blankSpec['形状']（方块|球体）+ blankSpec['密度']（g/cm³，选材质自动带出，可内联「改」维护目录）+ 尺寸齐全时按公式算--方块=料长×料宽×料厚×密度、球体=4/3π(外径/2)³×密度（毛重用毛坯尺寸、净重用成品尺寸），结果自动填入可手动覆盖；密度缺失退化为手填。**余料不参与报价计算**：余料重量=毛重−净重（自动算回填 blankSpec['余料重量']，只读），余料单价用户填（blankSpec['余料单价']），两者仅记录展示于详情页与 PDF 报价单。良率 `yieldRate`（百分数如 85）存 `calculation.inputs.yieldRate` 与 `priceSnapshot.yieldRate`。
 
 ### 三个「AI/规则」服务，勿混淆
 - **`AIReviewer.js`**（`POST /:id/ai-review`）：纯规则引擎（总价区间、K/T 材料占比、R/T 机加工占比、单价缺失/过期提醒），不调外部 API。状态 `ai_reviewed`。
@@ -72,7 +75,7 @@ W = V × 样品倍率                     // 样品价格（产品5倍率=1，W=
 
 ### 路由
 - `/api/quotes`（`routes/quotes.js`）：CRUD + `/:id/calculate` + `/:id/analyze-drawing` + `/:id/ai-quote` + `/:id/ai-review` + `/:id/manual-review` + `/:id/export`(PDF) + `/:id/3d-model`。`GET /` 支持 `?materialCode=&partName=&partDescription=&q=&status=` 追溯过滤；**列表查询是瘦身投影**（`Quote.LIST_SELECT`：只取展示列 + `JSON_EXTRACT` 抽 calculation.total/blankSpec.MOQ/priceSnapshot.unitPrice，勿改回 `SELECT *`--drawingAnalysis 等 LONGTEXT JSON 列单行数百 KB，57 行实测 7MB+）。**无图纸下载端点**——详情页只展示 drawingPath 文件名，唯一文件下载是 PDF 报价单导出（`res.download` 仅用于 PDF）。
-- `/api/catalog`（`routes/catalog.js`）：`GET materials`(含 active 价格+stale 标记)/`processes`/`strategies`；`POST materials/:id/prices`(确认单价，写历史)；`POST strategies`(新增成本策略，name 唯一校验)/`DELETE strategies/:id`(直接删，已有报价由 processSnapshot 快照保护)/`PUT strategies/:id`(改 name+7率+changeReason 审计)；`PUT processes/:id`(改工费率)。**已无 part-masters 路由**。
+- `/api/catalog`（`routes/catalog.js`）：`GET materials`(含 active 价格+stale 标记+priceMode+density)/`processes`/`strategies`；`POST materials`(新增材质，可选 priceMode/density)/`PUT materials/:id`(维护密度)/`materials/:id/prices`(确认单价，写历史)；`POST processes`(新增工站，code CUS- 前缀)/`PUT processes/:id`(改名/改计费类型/改费率)/`DELETE processes/:id`(软删 active=0)；`POST strategies`(新增成本策略，name 唯一校验)/`DELETE strategies/:id`(直接删，已有报价由 processSnapshot 快照保护)/`PUT strategies/:id`(改 name+7率+changeReason 审计)。**已无 part-masters 路由**。
 - `/api/upload`（`routes/upload.js`）：`POST /drawing`（multer 单文件上传）。
 - `/api/assistant`（Dify 聊天代理，与报价无关）。
 - `GET /health`：健康检查 + DeepSeek 配置状态。

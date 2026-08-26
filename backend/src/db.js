@@ -120,12 +120,18 @@ async function ensureSchema() {
         id BIGINT AUTO_INCREMENT PRIMARY KEY,
         code VARCHAR(128) NOT NULL UNIQUE,
         name VARCHAR(255) NOT NULL,
+        priceMode VARCHAR(16) NOT NULL DEFAULT 'weight',
+        density DECIMAL(10,4) NULL,
         active TINYINT(1) NOT NULL DEFAULT 1,
         createdBy VARCHAR(128) NULL,
         createdAt DATETIME NOT NULL,
         updatedAt DATETIME NOT NULL
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
+    // 计价方式：weight=元/kg（K=毛重×单价）| fixed=直接价格（K=单价本身）。存量材质默认 weight。
+    await ensureColumn(connection, 'materials', 'priceMode', "VARCHAR(16) NOT NULL DEFAULT 'weight'");
+    // 密度（g/cm³）：按材质维护，第3步用于按尺寸自动算毛重/净重（方块=长×宽×厚×密度，球体=球体积×密度）
+    await ensureColumn(connection, 'materials', 'density', 'DECIMAL(10,4) NULL');
     await connection.query(`
       CREATE TABLE IF NOT EXISTS material_prices (
         id BIGINT AUTO_INCREMENT PRIMARY KEY,

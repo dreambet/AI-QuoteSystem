@@ -198,7 +198,7 @@ router.post('/:id/calculate', async (req, res) => {
       return res.status(404).json({ error: 'Quote not found' });
     }
 
-    const { processSelection = [], unitPrice, strategyOverrides = {}, setupFee, strategyId } = req.body || {};
+    const { processSelection = [], unitPrice, strategyOverrides = {}, setupFee, strategyId, priceMode, yieldRate } = req.body || {};
 
     // 规格：优先专用列，回退 blankSpec/finishedSpec JSON
     const blankSpec = quote.blankSpec || {};
@@ -230,6 +230,15 @@ router.post('/:id/calculate', async (req, res) => {
     const selection = await enrichSelection(processSelection);
     const fee = setupFee != null ? num(setupFee) : num(strategy.setupFeeDefault, 0);
 
+    // 计价方式：请求体优先 -> 按当前材质查目录（weight=元/kg | fixed=直接价格）
+    let mode = priceMode === 'fixed' || priceMode === 'weight' ? priceMode : null;
+    if (!mode && quote.material) {
+      const matRows = await db.query('SELECT priceMode FROM materials WHERE code = ? OR name = ? LIMIT 1', [quote.material, quote.material]);
+      if (matRows.length && matRows[0].priceMode) mode = matRows[0].priceMode;
+    }
+    const resolvedMode = mode === 'fixed' ? 'fixed' : 'weight';
+    const yieldPercent = num(yieldRate);
+
     // 用户第3步手填单价 -> 回写共享目录 material_prices（旧 active 转 historical，新价升为 active）。
     // 失败不阻断计算，仅告警。
     if (priceSource === 'manual') {
@@ -239,7 +248,7 @@ router.post('/:id/calculate', async (req, res) => {
 
     const calculation = QuoteCalculator.calculate(
       { grossWeight, netWeight, quantity: quote.quantity },
-      { processSelection: selection, strategy, unitPrice: price, setupFee: fee }
+      { processSelection: selection, strategy, unitPrice: price, setupFee: fee, priceMode: resolvedMode, yieldRate: yieldPercent > 0 ? yieldPercent : null }
     );
 
     const priceSnapshot = {
@@ -247,6 +256,8 @@ router.post('/:id/calculate', async (req, res) => {
       material: quote.material,
       confirmedAt: priceConfirmedAt,
       source: priceSource,
+      priceMode: resolvedMode,
+      yieldRate: yieldPercent > 0 ? yieldPercent : null,
       stale: priceSource === 'catalog' ? isStale(priceConfirmedAt) : false
     };
     const processSnapshot = {
@@ -255,7 +266,8 @@ router.post('/:id/calculate', async (req, res) => {
       computed: { processes: calculation.processes, additions: calculation.additions }
     };
 
-    const updatedQuote = await Quote.update(req.params.id, {
+    // 重算后旧审核结果语义失效：参数已变更，标记 stale 供前端提示重新审核
+    const updateData = {
       calculation,
       priceSnapshot,
       processSnapshot,
@@ -264,7 +276,10 @@ router.post('/:id/calculate', async (req, res) => {
       netWeight,
       finalUnitPrice: calculation.unitPrice,
       status: 'calculated'
-    });
+    };
+    if (quote.aiReview) updateData.aiReview = { ...quote.aiReview, stale: true };
+    if (quote.manualReview) updateData.manualReview = { ...quote.manualReview, stale: true };
+    const updatedQuote = await Quote.update(req.params.id, updateData);
 
     res.json(updatedQuote);
   } catch (error) {
@@ -273,6 +288,8 @@ router.post('/:id/calculate', async (req, res) => {
   }
 });
 
+// 双层审核：规则层（零成本硬门槛）+ 本地基线层（同 materialCode 历史比对，涉价计算全本地）
+// + LLM 语义层（解读四类人为疏漏，白名单输入零价格）。LLM 失败静默降级为仅规则层。
 router.post('/:id/ai-review', async (req, res) => {
   try {
     const quote = await Quote.findById(req.params.id);
@@ -280,7 +297,34 @@ router.post('/:id/ai-review', async (req, res) => {
       return res.status(404).json({ error: 'Quote not found' });
     }
 
-    const aiReview = AIReviewer.review(quote);
+    // 第1层：规则引擎（硬门槛）
+    const ruleResult = AIReviewer.review(quote);
+
+    // 第2层：本地基线 + LLM 语义审核（仅在已有计算结果时执行）
+    let baseline = null;
+    let semantic = null;
+    if (quote.calculation) {
+      try {
+        if (quote.materialCode) {
+          const history = await db.query(
+            'SELECT id, materialCode, calculation, processSnapshot, updatedAt FROM quotes WHERE materialCode = ? AND id != ? ORDER BY updatedAt DESC LIMIT 5',
+            [quote.materialCode, quote.id]
+          );
+          baseline = AIReviewer.computeHistoryBaseline(quote, history);
+        }
+        const semanticPayload = buildSemanticReviewPayload(quote, baseline);
+        semantic = await DeepSeekService.semanticReview(semanticPayload);
+      } catch (layerError) {
+        console.error('语义审核层异常(降级为仅规则层):', layerError.message);
+      }
+    }
+
+    const aiReview = {
+      ...ruleResult,
+      baseline,
+      semantic,
+      reviewedAt: new Date().toISOString()
+    };
     const updatedQuote = await Quote.update(req.params.id, {
       aiReview,
       status: 'ai_reviewed'
@@ -290,6 +334,92 @@ router.post('/:id/ai-review', async (req, res) => {
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
+});
+
+// 流式双层审核：规则层+基线本地秒出（rules 事件先行推送前端展示），
+// 语义层 LLM 逐字流式（delta，reasoning/content 双通道），结束后合并落库并回传权威结果（done）。
+// 客户端断开即中止上游生成，不浪费 token；LLM 失败静默降级为仅规则层仍走 done。
+router.post('/:id/ai-review/stream', async (req, res) => {
+  const sse = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders && res.flushHeaders();
+
+  let quote;
+  try {
+    quote = await Quote.findById(req.params.id);
+    if (!quote) {
+      sse('error', { message: 'Quote not found' });
+      return res.end();
+    }
+    sse('meta', { quoteId: quote.id });
+  } catch (error) {
+    sse('error', { message: error.message });
+    return res.end();
+  }
+
+  // 客户端断开 -> 中止上游 LLM 生成
+  const abort = new AbortController();
+  let clientClosed = false;
+  req.on('close', () => {
+    clientClosed = true;
+    abort.abort();
+  });
+
+  try {
+    // 第1层：规则引擎（硬门槛，零成本）
+    const ruleResult = AIReviewer.review(quote);
+
+    // 第2层：本地基线（同 materialCode 历史比对，涉价计算全本地）
+    let baseline = null;
+    if (quote.calculation && quote.materialCode) {
+      try {
+        const history = await db.query(
+          'SELECT id, materialCode, calculation, processSnapshot, updatedAt FROM quotes WHERE materialCode = ? AND id != ? ORDER BY updatedAt DESC LIMIT 5',
+          [quote.materialCode, quote.id]
+        );
+        baseline = AIReviewer.computeHistoryBaseline(quote, history);
+      } catch (layerError) {
+        console.error('基线层异常(跳过):', layerError.message);
+      }
+    }
+    if (clientClosed) return;
+    sse('rules', { rules: ruleResult, baseline });
+
+    // 第3层：LLM 语义审核（流式；失败返回 null 静默降级为仅规则层）
+    let semantic = null;
+    if (quote.calculation) {
+      try {
+        const semanticPayload = buildSemanticReviewPayload(quote, baseline);
+        semantic = await DeepSeekService.semanticReviewStream(semanticPayload, {
+          signal: abort.signal,
+          onDelta: (t, kind) => { if (!clientClosed) sse('delta', { t, kind }); }
+        });
+      } catch (layerError) {
+        if (clientClosed || layerError.code === 'ERR_CANCELED') return;
+        console.error('语义审核层异常(降级为仅规则层):', layerError.message);
+      }
+    }
+    if (clientClosed) return;
+
+    const aiReview = {
+      ...ruleResult,
+      baseline,
+      semantic,
+      reviewedAt: new Date().toISOString()
+    };
+    const updatedQuote = await Quote.update(req.params.id, { aiReview, status: 'ai_reviewed' });
+    // 响应瘦身：drawingAnalysis 可能数百 KB，前端已有，剔除
+    const { drawingAnalysis: _skip, ...slimQuote } = updatedQuote || {};
+    sse('done', { aiReview, quote: slimQuote });
+  } catch (error) {
+    if (clientClosed) return;
+    console.error('AI流式审核失败:', error.message);
+    sse('error', { message: error.message || 'AI流式审核失败' });
+  }
+  res.end();
 });
 
 router.post('/:id/manual-review', async (req, res) => {
@@ -522,6 +652,43 @@ function buildAiQuotePayload(quote) {
     featureSummary,
     featureDetails: features.slice(0, 15).map(f => [f.type, f.description].filter(Boolean).join(' ')),
     notes: da.notes
+  };
+}
+
+// 语义审核输入白名单（零价格）：规格/工序/公差/特征 + 本地基线层结论（枚举/倍数）。
+// priceSnapshot/finalUnitPrice/calculation 金额等价格信息物理隔离，不进入序列化。
+function buildSemanticReviewPayload(quote, baseline) {
+  const da = quote.drawingAnalysis || {};
+  const features = Array.isArray(da.features) ? da.features : [];
+  const featureSummary = {};
+  features.forEach(f => { const key = f.type || '其他'; featureSummary[key] = (featureSummary[key] || 0) + 1; });
+  const keyDimensions = (Array.isArray(da.dimensionAnnotations) ? da.dimensionAnnotations : [])
+    .filter(d => d.value != null)
+    .slice(0, 5)
+    .map(d => `${d.type || '尺寸'}:${d.value}${d.tolerance ? `(公差${d.tolerance})` : ''}`);
+  return {
+    partName: quote.partName,
+    partDescription: quote.partDescription,
+    material: quote.material,
+    materialCode: quote.materialCode,
+    blankSpec: quote.blankSpec || {},
+    finishedSpec: quote.finishedSpec || {},
+    globalTolerance: da.globalTolerance || null,
+    keyDimensions,
+    featureSummary,
+    processes: ((quote.processSnapshot && quote.processSnapshot.processSelection) || []).map(p => ({
+      name: p.name,
+      costType: p.costType,
+      minutes: p.minutes != null ? Number(p.minutes) : null
+    })),
+    quantity: quote.quantity,
+    setupFeeApplied: Number(quote.calculation && quote.calculation.setupFee) > 0,
+    history: baseline ? {
+      firstQuote: !!baseline.firstQuote,
+      unitPriceDeviation: baseline.deviation || null,          // 枚举：高/偏高/正常
+      processDiff: baseline.processDiff || null,               // 文本：较历史增减的工序名
+      durationAnomalies: baseline.durationFlags || []          // [{process, multiple}] 倍数非价格
+    } : null
   };
 }
 

@@ -14,6 +14,9 @@
  *   U = T × 利润率                                // 利润
  *   V = (T + U) × (1 + 税率)                      // 合计成本（含税）
  *   W = V × 样品倍率                              // 样品价格（产品5倍率=1，W=V）
+ *   报价单价 = W ÷ 良率                            // 良率调整（填良率才生效，如 85% -> W/0.85）
+ *
+ * 材料计价方式 priceMode：'weight'（元/kg，K=毛重×单价，默认）| 'fixed'（直接价格，K=单价本身）。
  *
  * 静态、确定性、同输入同输出。
  */
@@ -31,21 +34,26 @@ const round = (value, digits = 4) => {
 class QuoteCalculator {
   /**
    * @param quote 报价对象（含 grossWeight/netWeight/quantity）
-   * @param options { processSelection, strategy, unitPrice, setupFee }
+   * @param options { processSelection, strategy, unitPrice, setupFee, priceMode, yieldRate }
    *   - processSelection: [{ processCode, name, costType, hourlyRate, minutes, unitRate, rate, amount }]
    *       costType: 'time' | 'percentage' | 'weight' | 'manual'
    *   - strategy: { overheadRate, profitRate, taxRate, sampleMultiplier, materialLossRate, toolLossRate }
-   *   - unitPrice: 用户确认的材料单价（元/kg）
+   *   - unitPrice: 用户确认的材料单价（元/kg 或 直接价格，语义由 priceMode 决定）
    *   - setupFee: 打样调机费（样品单叠加，量产为 0）
+   *   - priceMode: 'weight'=元/kg（K=毛重×单价）| 'fixed'=直接价格（K=单价本身），默认 weight
+   *   - yieldRate: 良率（百分数值，如 85 表示 85%）；>0 时报价单价 = W ÷ (良率/100)
    */
   static calculate(quote, options = {}) {
-    const { processSelection = [], strategy = {}, unitPrice: inputUnitPrice = null, setupFee = 0 } = options;
+    const { processSelection = [], strategy = {}, unitPrice: inputUnitPrice = null, setupFee = 0, priceMode = 'weight', yieldRate = null } = options;
 
     const grossWeight = num(quote.grossWeight);
     const netWeight = num(quote.netWeight);
     const quantity = Math.max(1, num(quote.quantity, 1));
     const price = num(inputUnitPrice);
     const fee = num(setupFee);
+    const isFixedPrice = priceMode === 'fixed';
+    const yieldPercent = num(yieldRate);
+    const yieldFactor = yieldPercent > 0 ? yieldPercent / 100 : 1;
 
     const rates = {
       overheadRate: num(strategy.overheadRate),
@@ -56,8 +64,8 @@ class QuoteCalculator {
       toolLossRate: num(strategy.toolLossRate)
     };
 
-    // 1. 材料成本 K = 毛重 × 单价
-    const K = round(grossWeight * price);
+    // 1. 材料成本 K：weight 模式 = 毛重 × 单价（元/kg）；fixed 模式 = 单价即直接价格
+    const K = round(isFixedPrice ? price : grossWeight * price);
 
     // 2. 机加工单制程成本 Q = 工费率/60 × 分钟；R = Σ 机加工 Q
     const machining = [];
@@ -130,8 +138,9 @@ class QuoteCalculator {
     // 8. 样品价格 W = V × 样品倍率
     const W = round(V * rates.sampleMultiplier);
 
-    // 9. 单价/总价
-    const unitPrice = W;
+    // 9. 良率调整：报价单价 = W ÷ 良率（85% 良率 -> 100/0.85），未填良率则不调整
+    const yieldApplied = yieldFactor !== 1;
+    const unitPrice = round(W / yieldFactor);
     const total = round(unitPrice * quantity + fee);
 
     return {
@@ -160,12 +169,16 @@ class QuoteCalculator {
         grossWeight,
         netWeight,
         unitPrice: price,
+        priceMode: isFixedPrice ? 'fixed' : 'weight',
+        yieldRate: yieldApplied ? yieldPercent : null,
         quantity
       },
 
       // 可解释性：每步算式
       formulaTrace: {
-        K: { label: '材料成本 K = 毛重 × 单价', expression: `${grossWeight} × ${price} = ${K}` },
+        K: isFixedPrice
+          ? { label: '材料成本 K = 直接价格', expression: `${price} = ${K}` }
+          : { label: '材料成本 K = 毛重 × 单价', expression: `${grossWeight} × ${price} = ${K}` },
         R: { label: '机加工成本 R = Σ 单制程成本', expression: `${machining.map(p => p.cost).join(' + ') || '0'} = ${R}` },
         additionsTotal: { label: '附加费用合计', expression: `${additions.map(a => a.cost).join(' + ') || '0'} = ${additionsTotal}` },
         S: { label: `管销 S = (R + 附加) × 管销率(${rates.overheadRate})`, expression: `(${R} + ${additionsTotal}) × ${rates.overheadRate} = ${S}` },
@@ -173,6 +186,9 @@ class QuoteCalculator {
         U: { label: `利润 U = T × 利润率(${rates.profitRate})`, expression: `${T} × ${rates.profitRate} = ${U}` },
         V: { label: `含税成本 V = (T + U) × (1 + 税率(${rates.taxRate}))`, expression: `(${T} + ${U}) × ${1 + rates.taxRate} = ${V}` },
         W: { label: `样品价格 W = V × 样品倍率(${rates.sampleMultiplier})`, expression: `${V} × ${rates.sampleMultiplier} = ${W}` },
+        ...(yieldApplied ? {
+          yieldAdjust: { label: `良率调整 报价单价 = W ÷ 良率(${yieldPercent}%)`, expression: `${W} ÷ ${yieldFactor} = ${unitPrice}` }
+        } : {}),
         total: { label: '总价 = 单价 × 数量 + 调机费', expression: `${unitPrice} × ${quantity} + ${fee} = ${total}` }
       },
 

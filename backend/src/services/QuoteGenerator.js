@@ -135,13 +135,31 @@ class QuoteGenerator {
         }
 
         const calculation = quote.calculation;
+        // 余料记录（不参与报价计算，仅呈现在报价单）：余料重量=毛重-净重（系统自动算），余料单价用户填写
+        const residualWeight = Number(blankSpec['余料重量']);
+        const residualPrice = Number(blankSpec['余料单价']);
+        const hasResidual = Number.isFinite(residualWeight) && residualWeight > 0
+          && Number.isFinite(residualPrice) && residualPrice > 0;
+        if (hasResidual) {
+          this.addSectionTitle(doc, '余料记录');
+          doc.fillColor('#213544').fontSize(10.5);
+          this.addKeyValue(doc, '余料重量(kg)：', this.value(blankSpec['余料重量']));
+          this.addKeyValue(doc, '余料单价(元/kg)：', this.value(blankSpec['余料单价']));
+          this.addKeyValue(doc, '余料价值：', `${this.value(blankSpec['余料重量'])} × ${this.value(blankSpec['余料单价'])} = ${this.amount(residualWeight * residualPrice)}（仅记录，不参与报价）`);
+        }
+
         if (calculation) {
           const priceSnap = quote.priceSnapshot || {};
+          const isFixedPrice = (calculation.inputs?.priceMode || priceSnap.priceMode) === 'fixed';
 
           this.addSectionTitle(doc, '报价计算明细');
           doc.fillColor('#117A8B').fontSize(11).text('01  材料成本');
           doc.fillColor('#213544').fontSize(10.5);
-          this.addKeyValue(doc, '毛重 × 单价：', `${Number(quote.grossWeight || calculation.inputs?.grossWeight || 0)} × ${this.value(priceSnap.unitPrice)} = ${this.amount(calculation.materialCost)}`);
+          if (isFixedPrice) {
+            this.addKeyValue(doc, '直接价格：', `${this.value(priceSnap.unitPrice)} = ${this.amount(calculation.materialCost)}`);
+          } else {
+            this.addKeyValue(doc, '毛重 × 单价：', `${Number(quote.grossWeight || calculation.inputs?.grossWeight || 0)} × ${this.value(priceSnap.unitPrice)} = ${this.amount(calculation.materialCost)}`);
+          }
 
           doc.moveDown(0.45).fillColor('#117A8B').fontSize(11).text('02  机加工工序');
           doc.fillColor('#213544').fontSize(10.5);
@@ -169,7 +187,7 @@ class QuoteGenerator {
           doc.moveDown(0.45).fillColor('#117A8B').fontSize(11).text('04  费用链');
           doc.fillColor('#213544').fontSize(10.5);
           const trace = calculation.formulaTrace || {};
-          ['K', 'R', 'S', 'T', 'U', 'V', 'W'].forEach(key => {
+          ['K', 'R', 'S', 'T', 'U', 'V', 'W', 'yieldAdjust'].forEach(key => {
             const t = trace[key];
             if (t) this.addKeyValue(doc, `${t.label}：`, t.expression);
           });
@@ -185,6 +203,9 @@ class QuoteGenerator {
             ['样品价格 W', calculation.samplePrice],
             ['打样调机费', calculation.setupFee]
           ];
+          if (calculation.inputs?.yieldRate != null && calculation.inputs.yieldRate > 0) {
+            costRows.splice(costRows.length - 1, 0, [`良率调整后单价（良率 ${calculation.inputs.yieldRate}%）`, calculation.unitPrice]);
+          }
           costRows.forEach(([label, cost]) => this.addKeyValue(doc, `${label}：`, this.amount(cost)));
           doc.moveDown(0.35);
           const totalBoxY = doc.y;
@@ -197,7 +218,8 @@ class QuoteGenerator {
           doc.y = totalBoxY + 52;
 
           if (priceSnap.unitPrice != null) {
-            this.addKeyValue(doc, '单价快照：', `${this.value(priceSnap.unitPrice)} 元/kg（来源 ${this.value(priceSnap.source)}，${priceSnap.confirmedAt ? new Date(priceSnap.confirmedAt).toLocaleString('zh-CN') : '未确认'}）`);
+            const unitLabel = (priceSnap.priceMode === 'fixed') ? '直接价格' : '元/kg';
+            this.addKeyValue(doc, '单价快照：', `${this.value(priceSnap.unitPrice)} ${unitLabel}（来源 ${this.value(priceSnap.source)}，${priceSnap.confirmedAt ? new Date(priceSnap.confirmedAt).toLocaleString('zh-CN') : '未确认'}）`);
           }
         }
 

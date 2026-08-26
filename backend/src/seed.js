@@ -3,10 +3,11 @@
  * 用法：npm run seed
  *
  * 数据主要由前序会话已种子化（materials/processes/pricing_strategies）。
- * 本脚本仅做三件未完成的修复，并保证可重复执行：
+ * 本脚本仅做以下修复，并保证可重复执行：
  *   1. 产品5 策略 sampleMultiplier 2 -> 1（计算公式总结.md：产品5 W=(T+U)×1.13，无×2）
  *   2. 阳极工序 unitRate 补 15（Q_阳极 = 15 × 净重）
  *   3. S31603 / S30408 占位 material_prices（待市场确认，触发第3步提醒）
+ *   5. 常用牌号密度预置（g/cm³，仅补空值；密度已恢复为 materials.density 列，用于按尺寸算毛/净重）
  */
 const db = require('./db');
 
@@ -81,14 +82,25 @@ async function renameStrategies(connection) {
   return `重命名 ${renamed} 条策略为 成本策略A..${String.fromCharCode(65 + rows.length - 1)}（共${rows.length}条）`;
 }
 
-// 移除 materials.density 列（业务不再使用密度参数）
-async function dropDensityColumn(connection) {
-  const [cols] = await connection.query(
-    `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'materials' AND COLUMN_NAME = 'density'`
-  );
-  if (!cols.length) return 'materials.density 已不存在，跳过';
-  await connection.query('ALTER TABLE materials DROP COLUMN density');
-  return 'materials.density 列已删除';
+// 密度预置（g/cm³）：仅补 NULL/0 的材质，已维护的值不覆盖（密度用于第3步按尺寸自动算毛/净重）
+async function presetDensities(connection) {
+  const presets = {
+    S31603: 7.98,       // 316L
+    S30408: 7.93,       // 304
+    S31609: 7.98,       // 316H
+    'S31609 不锈钢': 7.98
+  };
+  const results = [];
+  for (const [code, density] of Object.entries(presets)) {
+    const [rows] = await connection.query(
+      'SELECT id FROM materials WHERE code = ? AND (density IS NULL OR density = 0)',
+      [code]
+    );
+    if (!rows.length) { results.push(`${code}: 已有密度或材质不存在，跳过`); continue; }
+    await connection.query('UPDATE materials SET density = ?, updatedAt = ? WHERE id = ?', [density, NOW, rows[0].id]);
+    results.push(`${code}: 密度 ${density}`);
+  }
+  return results.join('；');
 }
 
 // ---------- 无用字段清理迁移（幂等，先 A 类后 B 类） ----------
@@ -191,7 +203,7 @@ async function main() {
     console.log('2)', await fixAnodizingUnitRate(connection));
     console.log('3)', await ensureGradeMaterialPrices(connection));
     console.log('4)', await renameStrategies(connection));
-    console.log('5)', await dropDensityColumn(connection));
+    console.log('5)', await presetDensities(connection));
     console.log('6)', await dropUselessColumns(connection));
     console.log('== 完成 ==');
   } finally {
