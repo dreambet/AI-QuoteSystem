@@ -1535,8 +1535,6 @@ const PROCESS_TYPE_OPTIONS = [
   { value: 'weight', label: '重量型（×净重）', rateLabel: '单价(元/kg)', rateKey: 'unitRate' },
   { value: 'manual', label: '单制程成本（填金额）', rateLabel: '默认金额(元)', rateKey: 'fixedAmount' }
 ];
-// 工序确认面板数字展示：精确至小数点后两位（去尾零，60 -> "60"、0.793 -> "0.79"）
-const fmt2 = v => String(Number(num(v).toFixed(2)));
 
 // 工序确认面板：填值即选中，实时汇总 R/S/T/U/V/W；工站可新增/改名/改费率/删除（全局共享目录）
 function ProcessConfirmPanel({ catalog, processInputs, onProcessInput, onToggleProcess, onCreateProcess, onUpdateProcess, onDeleteProcess, netWeight, inModal }) {
@@ -1661,7 +1659,7 @@ function ProcessConfirmPanel({ catalog, processInputs, onProcessInput, onToggleP
               <span className="process-name">{p.name}</span>
               {p.costType === 'time' && <>
                 <input className="proc-input" type="number" placeholder="分钟" value={inp.minutes ?? ''} onChange={e => onProcessInput(p.code, 'minutes', e.target.value)} />
-                <span className="process-rate">@{fmt2(p.hourlyRate)}元/h</span>
+                <span className="process-rate">@{p.hourlyRate}元/h</span>
               </>}
               {p.costType === 'percentage' && <>
                 <input className="proc-input" type="number" step="0.1" placeholder="损耗率%" value={inp.rate ?? ''} onChange={e => onProcessInput(p.code, 'rate', e.target.value)} />
@@ -1669,7 +1667,7 @@ function ProcessConfirmPanel({ catalog, processInputs, onProcessInput, onToggleP
               </>}
               {p.costType === 'weight' && <>
                 <input type="checkbox" checked={!!inp.enabled} onChange={e => onToggleProcess(p.code, e.target.checked)} />
-                <span className="process-rate">{fmt2(p.unitRate)}×净重({fmt2(netWeight)})</span>
+                <span className="process-rate">{p.unitRate}×净重({netWeight || 0})</span>
               </>}
               {p.costType === 'manual' && <>
                 <input className="proc-input" type="number" placeholder="金额" value={inp.amount ?? ''} onChange={e => onProcessInput(p.code, 'amount', e.target.value)} />
