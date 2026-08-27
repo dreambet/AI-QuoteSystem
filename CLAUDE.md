@@ -34,11 +34,12 @@ npm run build        # 生产构建到 build/
 ## 架构要点
 
 ### 数据存储：MySQL 多表 + JSON 列
-`db.js` 用 `mysql2/promise` 连接池，`ensureSchema()` 建表。当前 **5 张表**：
+`db.js` 用 `mysql2/promise` 连接池，`ensureSchema()` 建表。当前 **6 张表**：
 - `quotes`：报价主表，23 列。嵌套对象（`calculation`/`aiReview`/`manualReview`/`drawingAnalysis`/`aiQuoteAnalysis`/`blankSpec`/`finishedSpec`/`priceSnapshot`/`processSnapshot`）存为 LONGTEXT JSON 列，`db.parseRow` 读取时反序列化。`materialCode`/`grossWeight`/`netWeight`/`strategyVersionId`(BIGINT)/`finalUnitPrice` 为独立列；`id` 应用层生成。
-- `materials` + `material_prices`：材料牌号（S31603/S30408…）与带生效日期的单价历史（`status=active/historical`，`confirmedAt` 标记是否市场确认）。materials 带 `priceMode`（'weight'=元/kg | 'fixed'=直接价格，决定 K 的算法）与 `density`（g/cm³，第3步按尺寸自动算毛/净重用；PUT /materials/:id 维护）。
+- `materials` + `material_prices`：材料牌号（S31603/S30408…）与带生效日期的单价历史（`status=active/historical`，`confirmedAt` 标记是否市场确认）。materials 带 `priceMode`（'weight'=元/kg | 'fixed'=直接价格；仅用于下拉价格标注与带价，**计算由形状驱动**见成本公式节）与 `density`（g/cm³，第3步按尺寸自动算毛/净重用；PUT /materials/:id 维护）。
 - `processes`：19 道预置工序 + 用户自建工站（code `CUS-` 前缀，第3步弹窗内新增/改名/改费率/删除，全局共享），`costType` ∈ `time|percentage|weight|manual`，分别带 `hourlyRate`/`unitRate`/`fixedAmount`。删除为软删（`active=0`）。**已无 unit 列**。
 - `pricing_strategies`：报价策略，字段 `materialLossRate`/`toolLossRate`/`overheadRate`/`profitRate`/`taxRate`/`sampleMultiplier`/`setupFeeDefault` + `name`（唯一键）/`createdBy`/`changeReason`。预置 5 条（name `成本策略A..E`）。**已无 code 列**（原产品物码编码已删，改用 name 唯一识别）。
+- `shapes`：形状目录（全局共享），仅 `name` 唯一键。ensureSchema 预置方块/球体（INSERT IGNORE，带自动算重公式，前端 `shapeWeightKg` 按 name 匹配）。第3步形状下拉可新增（POST /shapes），自定义形状无算重公式（毛/净重手填、全量尺寸字段展示）；方块/球体不可删（DELETE /shapes/:id 拦截，防算重联动失效）。
 
 > ⚠️ **`part_masters` 与 `quote_events` 表已删除**（seed.js DROP，A 类无用清理）。旧的 `quotes.customer/usageContext/quoteType/partNumber/length/width/height/diameter/moq/deliveryDate/precision`、`materials.specification/priceUnit/density`、`pricing_strategies.version/config/publishedAt/status/setupFeeMin/...` 等列也已删。前端表单里的 `length/width/height/diameter/precision` 只是 formData 状态，**不持久化到 quotes 表独立列**（CAD 尺寸预填到 `blankSpec`/`finishedSpec` JSON）。
 
@@ -66,7 +67,7 @@ W = V × 样品倍率                     // 样品价格（产品5倍率=1，W=
 ```
 输出含 `materialCost/machiningCost/overhead/subtotal/profit/taxIncluded/samplePrice/setupFee/unitPrice/total` + `processes`/`additions` 明细 + `formulaTrace`（每步算式，供详情页/PDF 展示；良率生效时含 `yieldAdjust` 条目）。路由 `/:id/calculate` 收 `processSelection/unitPrice/strategyId/strategyOverrides/setupFee/priceMode/yieldRate`，写 `calculation/priceSnapshot/processSnapshot/strategyVersionId`。
 
-材料计价方式 `priceMode`（materials 表列，'weight'=元/kg 默认 | 'fixed'=直接价格）：calculate 请求体优先，否则按 quote.material 查 materials 目录；快照存 `priceSnapshot.priceMode`。**毛重/净重自动计算**（纯前端，不经过后端）：blankSpec['形状']（方块|球体）+ blankSpec['密度']（g/cm³，选材质自动带出，可内联「改」维护目录）+ 尺寸齐全时按公式算--方块=料长×料宽×料厚×密度、球体=4/3π(外径/2)³×密度（毛重用毛坯尺寸、净重用成品尺寸），结果自动填入可手动覆盖；密度缺失退化为手填。**余料不参与报价计算**：余料重量=毛重−净重（自动算回填 blankSpec['余料重量']，只读），余料单价用户填（blankSpec['余料单价']），两者仅记录展示于详情页与 PDF 报价单。良率 `yieldRate`（百分数如 85）存 `calculation.inputs.yieldRate` 与 `priceSnapshot.yieldRate`。
+计价方式**由形状驱动**（`shapePriceMode`：方块/球体='weight' 元/kg，K=毛重×单价；新增的自定义形状='fixed' 直接价，K=价格本身--直接价不适用于方块/球体）。calculate 解析优先级：请求体 priceMode -> blankSpec['形状'] -> 默认 weight；快照存 `priceSnapshot.priceMode`。materials 表 `priceMode` 列仅用于材质下拉价格标注（¥/kg vs ¥直接价）与选材质带价，**不再驱动计算**。**毛重/净重自动计算**（纯前端，不经过后端）：blankSpec['形状']（方块|球体）+ blankSpec['密度']（g/cm³，选材质自动带出，可内联「改」维护目录）+ 尺寸齐全时按公式算--方块=料长×料宽×料厚×密度、球体=4/3π(外径/2)³×密度（毛重用毛坯尺寸、净重用成品尺寸），结果自动填入可手动覆盖；密度缺失退化为手填。自定义形状无算重公式：前端隐藏 密度/毛重/余料 字段（直接价模式），净重仍手填（供重量型工序如阳极）。**余料不参与报价计算**：余料重量=毛重−净重（自动算回填 blankSpec['余料重量']，只读），余料单价用户填（blankSpec['余料单价']），两者仅记录展示于详情页与 PDF 报价单。良率 `yieldRate`（百分数如 85）存 `calculation.inputs.yieldRate` 与 `priceSnapshot.yieldRate`。
 
 ### 三个「AI/规则」服务，勿混淆
 - **`AIReviewer.js`**（`POST /:id/ai-review`）：纯规则引擎（总价区间、K/T 材料占比、R/T 机加工占比、单价缺失/过期提醒），不调外部 API。状态 `ai_reviewed`。
@@ -75,7 +76,7 @@ W = V × 样品倍率                     // 样品价格（产品5倍率=1，W=
 
 ### 路由
 - `/api/quotes`（`routes/quotes.js`）：CRUD + `/:id/calculate` + `/:id/analyze-drawing` + `/:id/ai-quote` + `/:id/ai-review` + `/:id/manual-review` + `/:id/export`(PDF) + `/:id/3d-model`。`GET /` 支持 `?materialCode=&partName=&partDescription=&q=&status=` 追溯过滤；**列表查询是瘦身投影**（`Quote.LIST_SELECT`：只取展示列 + `JSON_EXTRACT` 抽 calculation.total/blankSpec.MOQ/priceSnapshot.unitPrice，勿改回 `SELECT *`--drawingAnalysis 等 LONGTEXT JSON 列单行数百 KB，57 行实测 7MB+）。**无图纸下载端点**——详情页只展示 drawingPath 文件名，唯一文件下载是 PDF 报价单导出（`res.download` 仅用于 PDF）。
-- `/api/catalog`（`routes/catalog.js`）：`GET materials`(含 active 价格+stale 标记+priceMode+density)/`processes`/`strategies`；`POST materials`(新增材质，可选 priceMode/density)/`PUT materials/:id`(维护密度)/`materials/:id/prices`(确认单价，写历史)；`POST processes`(新增工站，code CUS- 前缀)/`PUT processes/:id`(改名/改计费类型/改费率)/`DELETE processes/:id`(软删 active=0)；`POST strategies`(新增成本策略，name 唯一校验)/`DELETE strategies/:id`(直接删，已有报价由 processSnapshot 快照保护)/`PUT strategies/:id`(改 name+7率+changeReason 审计)。**已无 part-masters 路由**。
+- `/api/catalog`（`routes/catalog.js`）：`GET materials`(含 active 价格+stale 标记+priceMode+density)/`processes`/`strategies`/`shapes`；`POST materials`(新增材质，可选 priceMode/density)/`PUT materials/:id`(维护密度)/`materials/:id/prices`(确认单价，写历史)；`POST processes`(新增工站，code CUS- 前缀)/`PUT processes/:id`(改名/改计费类型/改费率)/`DELETE processes/:id`(软删 active=0)；`POST strategies`(新增成本策略，name 唯一校验)/`DELETE strategies/:id`(直接删，已有报价由 processSnapshot 快照保护)/`PUT strategies/:id`(改 name+7率+changeReason 审计)；`POST shapes`(新增形状，name 唯一)/`DELETE shapes/:id`(方块/球体预置不可删)。**已无 part-masters 路由**。
 - `/api/upload`（`routes/upload.js`）：`POST /drawing`（multer 单文件上传）。
 - `/api/assistant`（Dify 聊天代理，与报价无关）。
 - `GET /health`：健康检查 + DeepSeek 配置状态。
@@ -101,7 +102,7 @@ W = V × 样品倍率                     // 样品价格（产品5倍率=1，W=
 AI 流程（`AIQuoteCreation.jsx`）5 步：
 1. **上传图纸**（仅选文件，不填基础信息）
 2. AI 解析图纸
-3. **确认特征与成本参数**：左特征列表 / 中 3D 预览 + 参数修正（基本信息 + 材料规格 blankSpec + 产品规格 finishedSpec + 单价确认带市场价提醒）/ 右 **工序确认面板**（机加工填加工时长、损耗填率、阳极勾选、单制程成本填金额；填值即选中；实时汇总 R/S/T/U/V/W；工费率可内联「改」维护）。AI 提取尺寸预填规格。
+3. **确认特征与成本参数**：左特征列表 / 中 3D 预览 + 参数修正（基本信息 + 材料规格 blankSpec + 产品规格 finishedSpec + 单价确认带市场价提醒）/ 右 **工序确认面板**（机加工填加工时长、损耗填率、阳极勾选、单制程成本填金额；填值即选中；实时汇总 R/S/T/U/V/W；工费率可内联「改」维护）。AI 提取尺寸预填规格。材质/形状/报价策略用 `ThemeSelect` 主题化下拉（规避 Chrome 原生 select 弹层首帧白屏；形状可新增全局共享；计价由形状驱动--方块/球体按公斤显示毛重/密度/余料，自定义形状按直接价隐藏这些字段）。
 4. 报价计算结果（K/R/S/T/U/V/W + 调机费）
 5. AI 建议 + 交付
 

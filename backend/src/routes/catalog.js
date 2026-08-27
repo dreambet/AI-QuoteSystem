@@ -213,6 +213,47 @@ router.delete('/processes/:id', async (req, res) => {
   }
 });
 
+// ---------- 形状 ----------
+// 形状目录（全局共享）：预置方块/球体带自动算重公式（前端 shapeWeightKg），用户新增形状仅作选择（毛/净重手填）
+const PRESET_SHAPES = ['方块', '球体'];
+
+router.get('/shapes', async (req, res) => {
+  try {
+    const rows = await db.query('SELECT id, name FROM shapes ORDER BY id');
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 新增形状（name 唯一）
+router.post('/shapes', async (req, res) => {
+  const trimName = req.body && req.body.name ? String(req.body.name).trim() : '';
+  if (!trimName) return res.status(400).json({ error: '形状名称(name)必填' });
+  try {
+    const exist = await db.query('SELECT id FROM shapes WHERE name = ?', [trimName]);
+    if (exist.length) return res.status(409).json({ error: '该形状已存在' });
+    const now = new Date();
+    const result = await db.query('INSERT INTO shapes (name, createdAt, updatedAt) VALUES (?, ?, ?)', [trimName, now, now]);
+    res.status(201).json({ id: result.insertId, name: trimName });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 删除形状（预置方块/球体带自动算重公式，不可删，防止算重联动失效）
+router.delete('/shapes/:id', async (req, res) => {
+  try {
+    const rows = await db.query('SELECT name FROM shapes WHERE id = ?', [req.params.id]);
+    if (!rows.length) return res.status(404).json({ error: '形状不存在' });
+    if (PRESET_SHAPES.includes(rows[0].name)) return res.status(400).json({ error: '预置形状（方块/球体）不可删除' });
+    await db.query('DELETE FROM shapes WHERE id = ?', [req.params.id]);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ---------- 报价策略 ----------
 router.get('/strategies', async (req, res) => {
   try {

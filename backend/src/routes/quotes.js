@@ -230,11 +230,12 @@ router.post('/:id/calculate', async (req, res) => {
     const selection = await enrichSelection(processSelection);
     const fee = setupFee != null ? num(setupFee) : num(strategy.setupFeeDefault, 0);
 
-    // 计价方式：请求体优先 -> 按当前材质查目录（weight=元/kg | fixed=直接价格）
+    // 计价方式由形状驱动（直接价不适用于方块/球体，仅用于新增的自定义形状）：
+    // 请求体优先 -> 形状（方块/球体=weight 元/kg | 自定义形状=fixed 直接价）-> weight
     let mode = priceMode === 'fixed' || priceMode === 'weight' ? priceMode : null;
-    if (!mode && quote.material) {
-      const matRows = await db.query('SELECT priceMode FROM materials WHERE code = ? OR name = ? LIMIT 1', [quote.material, quote.material]);
-      if (matRows.length && matRows[0].priceMode) mode = matRows[0].priceMode;
+    if (!mode) {
+      const shape = quote.blankSpec && quote.blankSpec['形状'];
+      mode = shape === '方块' || shape === '球体' || !shape ? 'weight' : 'fixed';
     }
     const resolvedMode = mode === 'fixed' ? 'fixed' : 'weight';
     const yieldPercent = num(yieldRate);

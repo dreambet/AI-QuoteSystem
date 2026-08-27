@@ -1522,6 +1522,11 @@ const autoCalcWeights = (data) => {
 };
 // 触发自动算重的键：尺寸/形状/密度（手动改毛/净重不触发，只重算余料）
 const WEIGHT_TRIGGER_KEYS = ['料长', '料宽', '料厚', '外径', '形状', '密度'];
+// 预置形状（带自动算重公式）
+const isPresetShape = name => name === '方块' || name === '球体';
+// 计价方式由形状驱动：方块/球体按公斤计价（K=毛重×单价）；新增的自定义形状按直接价（K=价格本身），
+// 直接价不适用于方块/球体（材料目录 priceMode 仅用于下拉价格标注与带价）。
+const shapePriceMode = shape => (isPresetShape(shape || '方块') ? 'weight' : 'fixed');
 
 // 计费类型选项：rateKey 为该类型可维护的费率字段（percentage 的率值来自策略默认，无需维护）
 const PROCESS_TYPE_OPTIONS = [
@@ -1530,6 +1535,8 @@ const PROCESS_TYPE_OPTIONS = [
   { value: 'weight', label: '重量型（×净重）', rateLabel: '单价(元/kg)', rateKey: 'unitRate' },
   { value: 'manual', label: '单制程成本（填金额）', rateLabel: '默认金额(元)', rateKey: 'fixedAmount' }
 ];
+// 工序确认面板数字展示：精确至小数点后两位（去尾零，60 -> "60"、0.793 -> "0.79"）
+const fmt2 = v => String(Number(num(v).toFixed(2)));
 
 // 工序确认面板：填值即选中，实时汇总 R/S/T/U/V/W；工站可新增/改名/改费率/删除（全局共享目录）
 function ProcessConfirmPanel({ catalog, processInputs, onProcessInput, onToggleProcess, onCreateProcess, onUpdateProcess, onDeleteProcess, netWeight, inModal }) {
@@ -1556,13 +1563,12 @@ function ProcessConfirmPanel({ catalog, processInputs, onProcessInput, onToggleP
     const name = addForm.name.trim();
     if (!name) { setAddError('请填写工站名称'); return; }
     if (addMode === 'direct') {
+      // 金额可留空：留空仅入库（下次报价列表可选，填值即选中）；填了则创建即选中并带入本次报价
       const amount = num(addForm.amount);
-      if (!(amount > 0)) { setAddError('请填写成本金额'); return; }
       setAddBusy(true); setAddError('');
       try {
-        const created = await onCreateProcess({ name, costType: 'manual', fixedAmount: amount });
-        // 快捷模式：创建即选中，金额带入当前报价参与计算
-        if (created && created.code) onProcessInput(created.code, 'amount', String(amount));
+        const created = await onCreateProcess({ name, costType: 'manual', fixedAmount: amount > 0 ? amount : null });
+        if (created && created.code && amount > 0) onProcessInput(created.code, 'amount', String(amount));
         setAddForm({ name: '', costType: 'manual', rate: '', amount: '' });
         setAdding(false);
       } catch (e) { setAddError(e.response?.data?.error || '新增工站失败'); }
@@ -1624,9 +1630,9 @@ function ProcessConfirmPanel({ catalog, processInputs, onProcessInput, onToggleP
       <div className="process-add-grid">
         <label><span>工站名称</span><input value={addForm.name} onChange={e => setAddForm(f => ({ ...f, name: e.target.value }))} placeholder="如：CNC 精铣" autoFocus /></label>
         {addMode === 'direct'
-          ? <label><span>成本金额(元)</span><input type="number" value={addForm.amount} onChange={e => setAddForm(f => ({ ...f, amount: e.target.value }))} placeholder="本次报价直接计入" /></label>
+          ? <label><span>成本金额(元)</span><input type="number" value={addForm.amount} onChange={e => setAddForm(f => ({ ...f, amount: e.target.value }))} placeholder="可留空，仅入库；填了带入本次" /></label>
           : <>
-            <label><span>计费类型</span><select value={addForm.costType} onChange={e => setAddForm(f => ({ ...f, costType: e.target.value, rate: '' }))}>{PROCESS_TYPE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}</select></label>
+            <label><span>计费类型</span><ThemeSelect value={addForm.costType} onChange={v => setAddForm(f => ({ ...f, costType: v, rate: '' }))} options={PROCESS_TYPE_OPTIONS.map(o => ({ value: o.value, label: o.label }))} /></label>
             {addTypeOption.rateKey && <label><span>{addTypeOption.rateLabel}</span><input type="number" value={addForm.rate} onChange={e => setAddForm(f => ({ ...f, rate: e.target.value }))} /></label>}
           </>}
       </div>
@@ -1655,7 +1661,7 @@ function ProcessConfirmPanel({ catalog, processInputs, onProcessInput, onToggleP
               <span className="process-name">{p.name}</span>
               {p.costType === 'time' && <>
                 <input className="proc-input" type="number" placeholder="分钟" value={inp.minutes ?? ''} onChange={e => onProcessInput(p.code, 'minutes', e.target.value)} />
-                <span className="process-rate">@{p.hourlyRate}元/h</span>
+                <span className="process-rate">@{fmt2(p.hourlyRate)}元/h</span>
               </>}
               {p.costType === 'percentage' && <>
                 <input className="proc-input" type="number" step="0.1" placeholder="损耗率%" value={inp.rate ?? ''} onChange={e => onProcessInput(p.code, 'rate', e.target.value)} />
@@ -1663,7 +1669,7 @@ function ProcessConfirmPanel({ catalog, processInputs, onProcessInput, onToggleP
               </>}
               {p.costType === 'weight' && <>
                 <input type="checkbox" checked={!!inp.enabled} onChange={e => onToggleProcess(p.code, e.target.checked)} />
-                <span className="process-rate">{p.unitRate}×净重({netWeight || 0})</span>
+                <span className="process-rate">{fmt2(p.unitRate)}×净重({fmt2(netWeight)})</span>
               </>}
               {p.costType === 'manual' && <>
                 <input className="proc-input" type="number" placeholder="金额" value={inp.amount ?? ''} onChange={e => onProcessInput(p.code, 'amount', e.target.value)} />
@@ -1690,24 +1696,28 @@ const FeatureRow = memo(function FeatureRow({ feature, index, selected, onSelect
   </button>;
 });
 
-function FeatureReviewWorkspace({ quoteId, formData, quote, analysisResult, selectedFeatureIndex, onSelectFeature, onChange, onSpecChange, onMaterialChange, onEditDensity, catalog, processInputs, onProcessInput, onToggleProcess, onOpenProcess, onBack, onCalculate, loading }) {
+function FeatureReviewWorkspace({ quoteId, formData, quote, analysisResult, selectedFeatureIndex, onSelectFeature, onChange, onSpecChange, onMaterialChange, onShapeChange, onEditDensity, catalog, processInputs, onProcessInput, onToggleProcess, onOpenProcess, onBack, onCalculate, loading }) {
   const features = analysisResult?.features || [];
   const is2DDrawing = (analysisResult?.modelInfo || analysisResult?.cadInfo?.modelInfo)?.type === 'drawing2d';
   const dimensions = analysisResult?.dimensions || formData;
   const metrics = [['长度', dimensions.length, 'mm'], ['宽度', dimensions.width, 'mm'], ['高度', dimensions.height, 'mm'], ['直径', dimensions.diameter, 'mm'], ['特征', features.length, '项'], ['实体', analysisResult?.cadInfo?.entityCount, '个']];
   const blankSpec = formData.blankSpec || {};
   const finishedSpec = formData.finishedSpec || {};
-  // 尺寸字段随形状切换：方块显示 料长/步距/料宽/料厚，球体只显示 外径（材料规格与产品规格同规则）
-  const isSphere = (blankSpec['形状'] || '方块') === '球体';
+  // 尺寸字段随形状切换：方块显示 料长/步距/料宽/料厚，球体只显示 外径，自定义形状全量展示（材料规格与产品规格同规则）
+  const shapeName = blankSpec['形状'] || '方块';
+  const isBlock = shapeName === '方块';
+  const isSphere = shapeName === '球体';
+  // 预置形状带自动算重公式；自定义形状（目录新增）无公式
+  const hasAutoWeight = isBlock || isSphere;
   const specField = (type, key) => ({
     value: (type === 'blank' ? blankSpec[key] : finishedSpec[key]) ?? '',
     onChange: e => onSpecChange(type, key, e.target.value)
   });
   const pct = v => `${Number(v) * 100}%`;
   const strategyLabel = (s) => `${s.name}（管销${pct(s.overheadRate)}/利润${pct(s.profitRate)}/税${pct(s.taxRate)}/倍率${Number(s.sampleMultiplier)}/材料损耗${pct(s.materialLossRate)}/刀具损耗${pct(s.toolLossRate)}）`;
-  // 所选材质的计价方式：fixed=直接价格（K=单价本身）| weight=元/kg（K=毛重×单价）
-  const selectedMaterial = (catalog.materials || []).find(m => m.code === formData.material);
-  const unitPriceLabel = selectedMaterial && selectedMaterial.priceMode === 'fixed' ? '材料价格(元)' : '材料单价(元/kg)';
+  // 计价方式由形状驱动（直接价不适用于方块/球体）：方块/球体=按公斤（K=毛重×单价）；自定义形状=直接价（K=价格本身）
+  const isFixedPrice = !hasAutoWeight;
+  const unitPriceLabel = isFixedPrice ? '材料价格(元)' : '材料单价(元/kg)';
   return <div className="feature-review">
     <WorkspaceTitle eyebrow="STEP 03 / FEATURE REVIEW" title={is2DDrawing ? '确认图纸特征与成本参数' : '确认特征与成本参数'} description="参照渲染图纸核对尺寸，填写材料/产品规格，并在右侧确认工序与单价后计算报价。" badge={analysisResult?.modelInfo?.label || 'CAD 模型已载入'} />
     <div className="review-layout">
@@ -1744,7 +1754,8 @@ function FeatureReviewWorkspace({ quoteId, formData, quote, analysisResult, sele
               onChange={onMaterialChange}
               placeholder="（选择材质）"
               options={[
-                ...(catalog.materials || []).map(m => {
+                // 计价联动过滤：方块/球体只列元/kg材质，自定义形状只列直接价材质（杜绝错位组合）
+                ...(catalog.materials || []).filter(m => hasAutoWeight ? m.priceMode !== 'fixed' : m.priceMode === 'fixed').map(m => {
                   const hasPrice = m.unitPrice != null && m.unitPrice !== '';
                   const priceTxt = hasPrice
                     ? (m.priceMode === 'fixed' ? `¥${Number(m.unitPrice).toFixed(2)}（直接价）` : `¥${Number(m.unitPrice).toFixed(2)}/kg`)
@@ -1759,37 +1770,66 @@ function FeatureReviewWorkspace({ quoteId, formData, quote, analysisResult, sele
           </label>
           <label className="spec-field">
             <span>形状</span>
-            <ThemeSelect value={blankSpec['形状'] || '方块'} onChange={v => onSpecChange('blank', '形状', v)} options={[{ value: '方块', label: '方块' }, { value: '球体', label: '球体' }]} />
+            <ThemeSelect
+              value={shapeName}
+              onChange={onShapeChange}
+              placeholder="（选择形状）"
+              options={[
+                ...(catalog.shapes && catalog.shapes.length ? catalog.shapes : [{ id: 1, name: '方块' }, { id: 2, name: '球体' }]).map(s =>
+                  ({ value: s.name, label: ['方块', '球体'].includes(s.name) ? `${s.name}（自动算重 · 元/kg）` : `${s.name}（直接价）` })
+                ),
+                { value: '__new__', label: '（+ 新增形状）' }
+              ]}
+            />
           </label>
-          <label className="spec-field">
+          {hasAutoWeight && <label className="spec-field">
             <span>密度(g/cm³)<button type="button" className="rate-edit-btn" onClick={onEditDensity} title="维护目录密度">改</button></span>
             <input type="number" step="0.001" value={blankSpec['密度'] ?? ''} readOnly placeholder="点击「改」维护" className="spec-auto-value" title="密度按材质维护在目录中，点击「改」维护" />
-          </label>
+          </label>}
           {isSphere
             ? <SpecField label="外径(mm)" type="number" {...specField('blank', '外径')} />
-            : <>
-              <SpecField label="料长(mm)" type="number" {...specField('blank', '料长')} />
-              <SpecField label="步距(mm)" type="number" {...specField('blank', '步距')} />
-              <SpecField label="料宽(mm)" type="number" {...specField('blank', '料宽')} />
-              <SpecField label="料厚(mm)" type="number" {...specField('blank', '料厚')} />
-            </>}
-          <SpecField label="毛重(kg)" type="number" step="0.0001" {...specField('blank', '毛重')} />
+            : isBlock
+              ? <>
+                <SpecField label="料长(mm)" type="number" {...specField('blank', '料长')} />
+                <SpecField label="步距(mm)" type="number" {...specField('blank', '步距')} />
+                <SpecField label="料宽(mm)" type="number" {...specField('blank', '料宽')} />
+                <SpecField label="料厚(mm)" type="number" {...specField('blank', '料厚')} />
+              </>
+              : <>
+                <SpecField label="料长(mm)" type="number" {...specField('blank', '料长')} />
+                <SpecField label="步距(mm)" type="number" {...specField('blank', '步距')} />
+                <SpecField label="料宽(mm)" type="number" {...specField('blank', '料宽')} />
+                <SpecField label="料厚(mm)" type="number" {...specField('blank', '料厚')} />
+                <SpecField label="外径(mm)" type="number" {...specField('blank', '外径')} />
+              </>}
+          {!isFixedPrice && <SpecField label="毛重(kg)" type="number" step="0.0001" {...specField('blank', '毛重')} />}
           <SpecField label="MOQ" type="number" {...specField('blank', 'MOQ')} />
-          <label className="spec-field"><span>余料重量(kg)</span><input type="text" className="spec-auto-value" value={blankSpec['余料重量'] ?? ''} readOnly placeholder="毛重−净重自动算" /></label>
-          <SpecField label="余料单价(元/kg)" type="number" step="0.01" {...specField('blank', '余料单价')} />
+          {!isFixedPrice && <>
+            <label className="spec-field"><span>余料重量(kg)</span><input type="text" className="spec-auto-value" value={blankSpec['余料重量'] ?? ''} readOnly placeholder="毛重−净重自动算" /></label>
+            <SpecField label="余料单价(元/kg)" type="number" step="0.01" {...specField('blank', '余料单价')} />
+          </>}
         </div>
-        <p className="spec-hint">选好形状与密度后，毛重/净重按尺寸自动计算（方块=长×宽×厚×密度，球体=外径球体积×密度，可手动修改）；余料重量=毛重−净重自动算，不参与报价。</p>
+        <p className="spec-hint">{hasAutoWeight
+          ? '选好形状与密度后，毛重/净重按尺寸自动计算（方块=长×宽×厚×密度，球体=外径球体积×密度，可手动修改）；余料重量=毛重−净重自动算，不参与报价；材质下拉仅列元/kg计价材质。'
+          : '自定义形状按直接价计价：材料成本 K = 价格本身（毛重/密度/余料不参与，已隐藏）；净重仍用于重量型工序（如阳极氧化），请手动填写；材质下拉仅列直接价材质（可「+ 新增材质」添加）。'}</p>
       </div>
       <div className="spec-section">
         <div className="spec-section-title">产品规格（成品）</div>
         <div className="spec-edit-grid">
           {isSphere
             ? <SpecField label="外径(mm)" type="number" {...specField('finished', '外径')} />
-            : <>
-              <SpecField label="料长(mm)" type="number" {...specField('finished', '料长')} />
-              <SpecField label="料宽(mm)" type="number" {...specField('finished', '料宽')} />
-              <SpecField label="料厚(mm)" type="number" {...specField('finished', '料厚')} />
-            </>}
+            : isBlock
+              ? <>
+                <SpecField label="料长(mm)" type="number" {...specField('finished', '料长')} />
+                <SpecField label="料宽(mm)" type="number" {...specField('finished', '料宽')} />
+                <SpecField label="料厚(mm)" type="number" {...specField('finished', '料厚')} />
+              </>
+              : <>
+                <SpecField label="料长(mm)" type="number" {...specField('finished', '料长')} />
+                <SpecField label="料宽(mm)" type="number" {...specField('finished', '料宽')} />
+                <SpecField label="料厚(mm)" type="number" {...specField('finished', '料厚')} />
+                <SpecField label="外径(mm)" type="number" {...specField('finished', '外径')} />
+              </>}
           <SpecField label="净重(kg)" type="number" step="0.0001" {...specField('finished', '净重')} />
         </div>
       </div>
@@ -1808,7 +1848,7 @@ function FeatureReviewWorkspace({ quoteId, formData, quote, analysisResult, sele
             />
           </Field>
         </div>
-        <p className="price-warn">⚠️ 市场价格波动，请确认最新单价后再计算；此单价将作为本次报价的价格快照留存。{selectedMaterial && selectedMaterial.priceMode === 'fixed' ? '该材质为直接价格：材料成本 = 价格本身，不再乘毛重。' : ''}良率填写后报价单价 = W ÷ 良率（如 85% -> 单价/0.85），留空则不调整。</p>
+        <p className="price-warn">⚠️ 市场价格波动，请确认最新单价后再计算；此单价将作为本次报价的价格快照留存。{isFixedPrice ? '自定义形状按直接价计价：材料成本 = 价格本身，不再乘毛重。' : ''}良率填写后报价单价 = W ÷ 良率（如 85% -> 单价/0.85），留空则不调整。</p>
       </div>
       <div className="workspace-actions"><button type="button" className="secondary-action" onClick={onBack}>返回分析</button><button type="button" className="primary-action" disabled={loading} onClick={onCalculate}>{loading ? '计算中…' : '确认参数并计算报价'}</button></div>
     </section>
@@ -1857,7 +1897,7 @@ function AIQuoteCreation() {
   const [error, setError] = useState(null);
   const [dragActive, setDragActive] = useState(false);
   const [selectedFeatureIndex, setSelectedFeatureIndex] = useState(0);
-  const [catalog, setCatalog] = useState({ materials: [], processes: [], strategies: [] });
+  const [catalog, setCatalog] = useState({ materials: [], processes: [], strategies: [], shapes: [] });
   const [processInputs, setProcessInputs] = useState({});
   const [processModalOpen, setProcessModalOpen] = useState(false);
   // AI 报价建议流式生成状态：null=非流式/已完成；{ active, text, reasoning }=正在流式生成
@@ -1940,10 +1980,20 @@ function AIQuoteCreation() {
   }, [quoteId, step, formData, processInputs, analysisResult]);
 
   useEffect(() => {
-    Promise.all([catalogApi.getMaterials(), catalogApi.getProcesses(), catalogApi.getStrategies()])
-      .then(([m, p, s]) => setCatalog({ materials: m.data, processes: p.data, strategies: s.data }))
+    Promise.all([catalogApi.getMaterials(), catalogApi.getProcesses(), catalogApi.getStrategies(), catalogApi.getShapes()])
+      .then(([m, p, s, sh]) => setCatalog({ materials: m.data, processes: p.data, strategies: s.data, shapes: sh.data }))
       .catch(() => { /* 目录加载失败不阻塞流程 */ });
   }, []);
+
+  // 兜底：材质计价方式与形状不匹配时清空（如恢复的历史会话），防错位组合进入计算
+  // deps 只列材质/形状相关项：仅在这些变化时需要重新校验兼容性
+  useEffect(() => {
+    const material = (catalog.materials || []).find(m => m.code === formData.material);
+    if (!material) return;
+    if ((material.priceMode === 'fixed') !== (shapePriceMode((formData.blankSpec || {})['形状']) === 'fixed')) {
+      setFormData(d => ({ ...d, material: '', unitPrice: '', blankSpec: { ...d.blankSpec, '材质': '' } }));
+    }
+  }, [catalog.materials, formData.material, (formData.blankSpec || {})['形状']]);
 
   // 工序确认弹窗打开时锁定背景滚动，避免弹窗内滚动带动确认特征页面
   useEffect(() => {
@@ -1961,6 +2011,16 @@ function AIQuoteCreation() {
       const moq = parseFloat(value);
       next.quantity = Number.isFinite(moq) && moq > 0 ? String(Math.floor(moq)) : '1';
     }
+    // 形状切换：材质计价方式须与新形状匹配（方块/球体↔元/kg，自定义↔直接价），不匹配则清空材质/单价待重选
+    if (type === 'blank' && key === '形状') {
+      const fixedMode = !isPresetShape(value);
+      const cur = (catalog.materials || []).find(m => m.code === next.material);
+      if (cur && (cur.priceMode === 'fixed') !== fixedMode) {
+        next.material = '';
+        next.blankSpec = { ...next.blankSpec, '材质': '' };
+        next.unitPrice = '';
+      }
+    }
     if (WEIGHT_TRIGGER_KEYS.includes(key)) {
       // 改尺寸/形状/密度 -> 重算毛/净重（密度可得且尺寸齐全才覆盖）+ 余料
       next = autoCalcWeights(next);
@@ -1977,18 +2037,26 @@ function AIQuoteCreation() {
     if (value === '__new__') {
       const code = window.prompt('输入新材质牌号（编码，如 S31603）', '');
       if (!code || !code.trim()) return;
-      if ((catalog.materials || []).some(m => m.code === code.trim())) { setError('该材质已存在，已自动选中'); setFormData(d => ({ ...d, material: code.trim(), blankSpec: { ...d.blankSpec, '材质': code.trim() } })); return; }
-      // 计价方式：1=按公斤（元/kg），2=直接价格（K=单价本身）；留空默认按公斤
-      const modeAnswer = window.prompt('该材质计价方式：输入 1 = 按公斤（元/kg），输入 2 = 直接价格', '1');
-      const priceMode = String(modeAnswer == null ? '1' : modeAnswer).trim() === '2' ? 'fixed' : 'weight';
-      // 密度（g/cm³，可选）：用于按尺寸自动算毛/净重（如不锈钢 7.93、铝 2.70）
-      const densityAnswer = window.prompt('该材质密度（g/cm³，如不锈钢 7.93、铝 2.70；可留空）', '');
+      // 计价方式由当前形状推导（方块/球体=元/kg，自定义形状=直接价），与下拉过滤规则一致
+      const priceMode = shapePriceMode((formData.blankSpec || {})['形状']);
+      const exists = (catalog.materials || []).find(m => m.code === code.trim());
+      if (exists) {
+        if ((exists.priceMode === 'fixed') !== (priceMode === 'fixed')) {
+          setError(`该材质为${exists.priceMode === 'fixed' ? '直接价' : '元/kg'}计价，与当前形状（${priceMode === 'fixed' ? '直接价' : '元/kg'}）不匹配，请先切换形状`);
+          return;
+        }
+        setError('该材质已存在，已自动选中');
+        setFormData(d => ({ ...d, material: code.trim(), blankSpec: { ...d.blankSpec, '材质': code.trim() } }));
+        return;
+      }
+      // 密度（g/cm³，可选）：仅元/kg材质有意义，用于按尺寸自动算毛/净重
+      const densityAnswer = priceMode === 'weight' ? window.prompt('该材质密度（g/cm³，如不锈钢 7.93、铝 2.70；可留空）', '') : null;
       const density = densityAnswer != null && densityAnswer.trim() !== '' && !Number.isNaN(Number(densityAnswer)) ? Number(densityAnswer) : null;
       try {
         await catalogApi.createMaterial({ code: code.trim(), name: code.trim(), priceMode, density });
         const m = await catalogApi.getMaterials();
         setCatalog(c => ({ ...c, materials: m.data }));
-        setFormData(d => ({ ...d, material: code.trim(), blankSpec: { ...d.blankSpec, '材质': code.trim() } }));
+        setFormData(d => ({ ...d, material: code.trim(), blankSpec: { ...d.blankSpec, '材质': code.trim(), ...(priceMode === 'weight' && density != null ? { '密度': String(density) } : {}) } }));
         setError(null);
       } catch (err) { setError(err.response?.data?.error || '新增材质失败'); }
       return;
@@ -2046,6 +2114,22 @@ function AIQuoteCreation() {
       setCatalog(c => ({ ...c, materials: c.materials.map(x => x.id === material.id ? { ...x, density } : x) }));
       setFormData(d => autoCalcWeights({ ...d, blankSpec: { ...d.blankSpec, '密度': String(density) } }));
     } catch (e) { setError(e.response?.data?.error || '密度更新失败'); }
+  };
+  // 形状维护（全局共享目录）：新增形状入库供后续报价复用；自定义形状无自动算重公式（毛/净重手填）
+  const onShapeChange = async (value) => {
+    if (value === '__new__') {
+      const answer = window.prompt('新增形状名称（如 圆柱体、圆锥体），保存后全局可用', '');
+      const name = answer && answer.trim();
+      if (!name) return;
+      try {
+        const response = await catalogApi.createShape({ name });
+        setCatalog(c => ({ ...c, shapes: [...(c.shapes || []), response.data] }));
+        // 走 handleSpecChange：触发材质计价联动（不匹配则清空）+ 毛/净重/余料自动算
+        handleSpecChange('blank', '形状', name);
+      } catch (e) { setError(e.response?.data?.error || '新增形状失败'); }
+      return;
+    }
+    handleSpecChange('blank', '形状', value);
   };
 
   const resolveStrategy = () => (catalog.strategies || []).find(s => String(s.id) === String(formData.strategyId)) || (catalog.strategies || [])[0] || { overheadRate: 0.1, profitRate: 0.3, taxRate: 0.13, sampleMultiplier: 1, materialLossRate: 0.05, toolLossRate: 0.08 };
@@ -2114,8 +2198,8 @@ function AIQuoteCreation() {
         unitPrice: formData.unitPrice !== '' ? num(formData.unitPrice) : undefined,
         strategyId: formData.strategyId || undefined,
         setupFee: num(formData.setupFee),
-        // 计价方式随所选材质（元/kg 或 直接价格）；良率留空则不调整
-        priceMode: ((catalog.materials || []).find(m => m.code === formData.material) || {}).priceMode || undefined,
+        // 计价方式由形状驱动（直接价不适用于方块/球体）：方块/球体=元/kg（K=毛重×单价），自定义形状=直接价（K=价格本身）；良率留空则不调整
+        priceMode: shapePriceMode((formData.blankSpec || {})['形状']),
         yieldRate: formData.yieldRate !== '' ? num(formData.yieldRate) : undefined
       });
       setQuote(response.data); setStep(4);
@@ -2177,7 +2261,7 @@ function AIQuoteCreation() {
     // ---- 阶段二：生成完成（done 事件权威数据） ----
     const groups = [['材料推荐', ai?.materialRecommendation ? [ai.materialRecommendation] : []], ['工艺建议', ai?.processSuggestions?.map(item => `${item.process || item.name}：${item.reason}`) || []], ['风险提示', ai?.warningPoints || []], ['优化建议', ai?.suggestions || []]]; return <div className="step-workspace"><WorkspaceTitle eyebrow="STEP 05 / DELIVERY" title="报价交付与 AI 建议" description="汇总报价结论、工艺判断和关键风险，支持返回任意已完成步骤复核。" badge="交付就绪" /><div className="delivery-total"><span>最终参考报价</span><strong>{money(quote?.calculation?.total)}</strong><small>{formData.partName || '未命名零件'} · {formData.material} · {formData.quantity} 件</small></div><div className="advice-grid">{groups.map(([title, items]) => <section key={title}><h3>{title}</h3>{items.length ? <ul>{items.map((item, index) => <li key={index}>{item}</li>)}</ul> : <p>暂无额外建议。</p>}</section>)}</div><div className="workspace-actions"><button type="button" className="secondary-action" onClick={() => setStep(4)}>返回报价计算</button><Link className="primary-action link-action" to={`/quotes/${quoteId}`}>查看报价详情</Link><Link className="secondary-action link-action" to="/quotes">返回报价列表</Link></div></div>;
   };
-  const mainContent = step === 1 ? renderStep1() : step === 2 ? renderStep2() : step === 3 ? <FeatureReviewWorkspace quoteId={quoteId} formData={formData} quote={quote} analysisResult={analysisResult} selectedFeatureIndex={selectedFeatureIndex} onSelectFeature={setSelectedFeatureIndex} onChange={handleFormChange} onSpecChange={handleSpecChange} onMaterialChange={handleMaterialChange} onEditDensity={onEditDensity} catalog={catalog} processInputs={processInputs} onProcessInput={onProcessInput} onToggleProcess={onToggleProcess} onOpenProcess={() => setProcessModalOpen(true)} onBack={() => setStep(2)} onCalculate={calculateQuote} loading={loading} /> : step === 4 ? renderStep4() : renderStep5();
+  const mainContent = step === 1 ? renderStep1() : step === 2 ? renderStep2() : step === 3 ? <FeatureReviewWorkspace quoteId={quoteId} formData={formData} quote={quote} analysisResult={analysisResult} selectedFeatureIndex={selectedFeatureIndex} onSelectFeature={setSelectedFeatureIndex} onChange={handleFormChange} onSpecChange={handleSpecChange} onMaterialChange={handleMaterialChange} onShapeChange={onShapeChange} onEditDensity={onEditDensity} catalog={catalog} processInputs={processInputs} onProcessInput={onProcessInput} onToggleProcess={onToggleProcess} onOpenProcess={() => setProcessModalOpen(true)} onBack={() => setStep(2)} onCalculate={calculateQuote} loading={loading} /> : step === 4 ? renderStep4() : renderStep5();
   const context = step === 3 ? (analysisResult?.features || []).length : step >= 4 ? money(quote?.calculation?.total) : quote ? fileExtension(quote.drawingPath) : '等待输入';
   return <div className="ai-quote-page"><main className="cad-console"><header className="console-hero"><div><span className="eyebrow">CAD INTELLIGENCE / QUOTATION WORKBENCH</span><h1>机加工模型分析工作台</h1><p>从图纸解析到报价交付，在同一个精密制造工作台内完成。</p></div><div className="console-hero-status"><span>{quote ? '任务进行中' : '新建任务'}</span><span>{fileExtension(quote?.drawingPath || selectedFile?.name)}</span><span>360° 预览</span></div></header><div className={`console-layout${step === 3 ? ' step3-full' : ''}`}><aside className="workflow-rail"><div className="rail-heading"><span>ANALYSIS FLOW</span><b>{step} / 5</b></div><nav>{WORKFLOW_STEPS.map(item => { const available = item.id <= completedStep; const state = item.id === step ? 'active' : item.id < step || (item.id < completedStep) ? 'done' : 'locked'; return <button key={item.id} type="button" className={`workflow-node ${state}`} disabled={!available} onClick={() => available && setStep(item.id)}><i>{state === 'done' ? '✓' : item.icon}</i><span><strong>{item.title}</strong><small>{item.subtitle}</small></span>{state === 'locked' && <em>LOCK</em>}</button>; })}</nav><div className="rail-footnote"><span>当前任务</span><strong>{quoteId ? `#${quoteId}` : '未创建'}</strong><small>后续步骤将在前置数据完成后自动解锁</small></div></aside><section className="console-main">{error && <div className="console-error">{error}<button type="button" onClick={() => setError(null)}>×</button></div>}{mainContent}</section>{step !== 3 && <aside className="context-rail"><div className="context-title"><span>任务摘要</span><b>LIVE</b></div><div className="context-file"><span className="context-file-type">{fileExtension(quote?.drawingPath || selectedFile?.name)}</span><small>当前图纸</small><strong>{fileName(quote?.drawingPath || selectedFile?.name)}</strong></div><div className="context-stat"><span>{step === 3 ? '识别特征' : step >= 4 ? '当前报价' : '任务状态'}</span><strong>{context}</strong><small>{step === 3 ? '可选择并定位' : step >= 4 ? '含成本构成' : quote ? '等待下一步操作' : '请上传图纸'}</small></div>{step >= 4 && <div className="context-list"><span>数据概览</span><p>物料描述 <strong>{formData.partDescription || '-'}</strong></p><p>材料 <strong>{formData.material || '-'}</strong></p><p>毛重 <strong>{formData.blankSpec?.['毛重'] || '-'}</strong></p><p>MOQ数量 <strong>{formData.blankSpec?.['MOQ'] || '-'}</strong></p></div>}<div className="context-tip"><span>操作提示</span><p>{step === 3 ? '在参数修正-基本信息中点击「工序确认」填写工序参数，填值即选中。' : step === 1 ? '优先上传 DWG、DXF、STEP 或 STP 文件，以获得更完整的解析结果。' : '完成当前任务后，下一阶段将在流程中自动解锁。'}</p></div></aside>}</div>{step === 3 && processModalOpen && <div className="console-modal-mask" onClick={() => setProcessModalOpen(false)}><div className="console-modal" onClick={event => event.stopPropagation()}><div className="console-modal-head"><div><span>工序确认</span><small>填加工时长 / 损耗率% / 单制程成本金额即选中对应工序，未填值不参与计算</small></div><button type="button" onClick={() => setProcessModalOpen(false)}>×</button></div><div className="console-modal-body"><ProcessConfirmPanel inModal catalog={catalog} processInputs={processInputs} onProcessInput={onProcessInput} onToggleProcess={onToggleProcess} onCreateProcess={createProcess} onUpdateProcess={updateProcess} onDeleteProcess={deleteProcess} netWeight={num((formData.finishedSpec || {})['净重'])} /></div><div className="console-modal-foot"><span className="console-modal-hint">工站可新增/修改/删除（全局共享）；阳极氧化按勾选：单价×净重；损耗率留空则沿用所选策略默认值。</span><button type="button" className="primary-action" onClick={() => setProcessModalOpen(false)}>完成确认</button></div></div></div>}</main></div>;
 }

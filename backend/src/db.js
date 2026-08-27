@@ -181,6 +181,16 @@ async function ensureSchema() {
         updatedAt DATETIME NOT NULL
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
+    // 形状目录（全局共享）：预置方块/球体带自动算重公式；用户新增形状供第3步选择（无公式，毛/净重手填）
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS shapes (
+        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(64) NOT NULL UNIQUE,
+        createdAt DATETIME NOT NULL,
+        updatedAt DATETIME NOT NULL
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+    await connection.query('INSERT IGNORE INTO shapes (name, createdAt, updatedAt) VALUES (?, NOW(), NOW()), (?, NOW(), NOW())', ['方块', '球体']);
   } finally {
     connection.release();
   }
