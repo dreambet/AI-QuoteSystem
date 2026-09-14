@@ -120,18 +120,18 @@ function QuoteDetail() {
   };
   const cancelReview = () => { if (reviewAbortRef.current) reviewAbortRef.current.abort(); };
   const manualReview = async () => setQuote((await quoteApi.manualReview(id, reviewData)).data);
-  const exportPdf = async () => {
+  const exportExcel = async () => {
     setExporting(true); setExportError('');
     try {
-      const response = await quoteApi.export(id);
-      const blobUrl = URL.createObjectURL(new Blob([response.data], { type: 'application/pdf' }));
+      const response = await quoteApi.exportExcel(id);
+      const blobUrl = URL.createObjectURL(new Blob([response.data], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
       const link = document.createElement('a');
-      const filename = `报价单-${quote.partName || quote.id}.pdf`;
+      const filename = `核价单-${quote.partName || quote.id}.xlsx`;
       link.href = blobUrl; link.download = filename;
       document.body.appendChild(link); link.click(); link.remove();
       window.setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
     } catch (error) {
-      setExportError('PDF 导出失败，请稍后重试。');
+      setExportError('Excel 导出失败，请稍后重试。');
     } finally { setExporting(false); }
   };
 
@@ -226,7 +226,7 @@ function QuoteDetail() {
 
           {quote.aiReview && (!quote.manualReview || manualResubmittable) && <div className="manual-review-form">{manualResubmittable && <p className="detail-muted">参数修改后已重新完成 AI 审核，请重新提交人工审核结论。</p>}<label>审核结论<select value={reviewData.status} onChange={event => setReviewData(data => ({ ...data, status: event.target.value }))}><option value="approved">通过</option><option value="needs_modification">需修改</option></select></label><label>审核意见<textarea value={reviewData.comments} onChange={event => setReviewData(data => ({ ...data, comments: event.target.value }))} placeholder="填写人工审核意见" /></label><button type="button" className="primary-action full-action" onClick={manualReview}>提交人工审核</button></div>}
           {quote.manualReview && <div className="manual-review-complete"><span>人工审核：{quote.manualReview.status === 'approved' ? '通过' : quote.manualReview.status === 'rejected' ? '拒绝' : '需修改'}</span>{quote.manualReview.stale && <em className="review-stale-tag">报价参数已变更，建议重新审核</em>}<p>{quote.manualReview.comments || '未填写额外意见'}</p></div>}
-          {quote.manualReview?.status === 'approved' && <button type="button" className="export-button full-action" disabled={exporting} onClick={exportPdf}>{exporting ? '正在生成 PDF…' : '导出报价单 PDF'}</button>}
+          {quote.manualReview?.status === 'approved' && <button type="button" className="export-button full-action" disabled={exporting} onClick={exportExcel}>{exporting ? '正在生成 Excel…' : '导出核价单 Excel'}</button>}
           {reviewError && <p className="export-error">{reviewError}</p>}
           {exportError && <p className="export-error">{exportError}</p>}
         </section>

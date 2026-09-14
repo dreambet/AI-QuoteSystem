@@ -4,7 +4,7 @@ const multer = require('multer');
 const Quote = require('../models/Quote');
 const QuoteCalculator = require('../services/QuoteCalculator');
 const AIReviewer = require('../services/AIReviewer');
-const QuoteGenerator = require('../services/QuoteGenerator');
+const QuoteExcelGenerator = require('../services/QuoteExcelGenerator');
 const DeepSeekService = require('../services/DeepSeekService');
 const cadParserPool = require('../services/cadParserPool');
 // 启动即预热解析 worker（加载 occt WASM），首次图纸分析无需叠加初始化耗时
@@ -450,10 +450,10 @@ router.get('/:id/export', async (req, res) => {
       return res.status(404).json({ error: 'Quote not found' });
     }
 
-    const outputPath = path.join(uploadsDir, `quote-${quote.id}.pdf`);
-    await QuoteGenerator.generatePDF(quote, outputPath);
+    const outputPath = path.join(uploadsDir, `quote-${quote.id}.xlsx`);
+    await QuoteExcelGenerator.generate(quote, outputPath);
 
-    res.download(outputPath, `报价单-${quote.partName}.pdf`);
+    res.download(outputPath, `核价单-${quote.partName || quote.id}.xlsx`);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

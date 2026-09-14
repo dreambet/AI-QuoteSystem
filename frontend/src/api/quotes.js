@@ -54,7 +54,7 @@ export const quoteApi = {
   calculate: (id, data) => axios.post(`${API_BASE}/${id}/calculate`, data || {}),
   aiReview: (id) => axios.post(`${API_BASE}/${id}/ai-review`),
   manualReview: (id, data) => axios.post(`${API_BASE}/${id}/manual-review`, data),
-  export: (id) => axios.get(`${API_BASE}/${id}/export`, { responseType: 'blob' }),
+  exportExcel: (id) => axios.get(`${API_BASE}/${id}/export`, { responseType: 'blob' }),
   analyzeDrawing: (id, data) => axios.post(`${API_BASE}/${id}/analyze-drawing`, data),
   aiQuote: (id, data) => axios.post(`${API_BASE}/${id}/ai-quote`, data),
   // 流式 AI 报价建议：SSE 增量转发。handlers: { onMeta, onDelta(t), onDone(data), onError(err) }
