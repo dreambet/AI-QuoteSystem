@@ -38,7 +38,9 @@ const drawingStorage = multer.diskStorage({
     cb(null, uniqueSuffix + path.extname(file.originalname));
   }
 });
-const uploadDrawing = multer({ storage: drawingStorage, fileFilter: drawingFileFilter });
+// 单文件 50MB 上限（与 upload.js 一致），防止无限制上传耗尽磁盘
+const MAX_FILE_SIZE = Number(process.env.MAX_FILE_SIZE) || 50 * 1024 * 1024;
+const uploadDrawing = multer({ storage: drawingStorage, fileFilter: drawingFileFilter, limits: { fileSize: MAX_FILE_SIZE } });
 
 // ---------- 计算辅助 ----------
 const num = (value, fallback = 0) => {
@@ -444,17 +446,32 @@ router.post('/:id/manual-review', async (req, res) => {
 });
 
 router.get('/:id/export', async (req, res) => {
+  let outputPath = null;
   try {
     const quote = await Quote.findById(req.params.id);
     if (!quote) {
       return res.status(404).json({ error: 'Quote not found' });
     }
+    // 服务端硬校验：与前端按钮门槛一致，未通过人工审核或未计算的报价不允许导出
+    if (quote.manualReview?.status !== 'approved') {
+      return res.status(403).json({ error: '报价单需人工审核通过后才能导出' });
+    }
+    if (!quote.calculation) {
+      return res.status(409).json({ error: '该报价尚未完成计算，无法导出' });
+    }
 
-    const outputPath = path.join(uploadsDir, `quote-${quote.id}.xlsx`);
+    outputPath = path.join(uploadsDir, `quote-${quote.id}.xlsx`);
     await QuoteExcelGenerator.generate(quote, outputPath);
 
-    res.download(outputPath, `核价单-${quote.partName || quote.id}.xlsx`);
+    // 文件名过滤 Windows 非法字符与控制符，避免 Content-Disposition 异常
+    const safeName = String(quote.partName || quote.id).replace(/[\\/:*?"<>|\r\n]+/g, '_').trim() || quote.id;
+    res.download(outputPath, `核价单-${safeName}.xlsx`, () => {
+      // 下载结束（成功或失败）即清理临时文件，避免 uploads 目录堆积
+      fs.unlink(outputPath, () => {});
+      outputPath = null;
+    });
   } catch (error) {
+    if (outputPath) fs.unlink(outputPath, () => {});
     res.status(500).json({ error: error.message });
   }
 });
@@ -490,7 +507,11 @@ router.post('/:id/analyze-drawing', uploadDrawing.single('drawing'), async (req,
       });
     }
 
-    const fullPath = path.join(uploadsDir, drawingPath);
+    // 路径穿越防御：drawingPath 可能来自客户端，必须落在 uploadsDir 内
+    const fullPath = path.resolve(path.join(uploadsDir, drawingPath));
+    if (!fullPath.startsWith(path.resolve(uploadsDir) + path.sep)) {
+      return res.status(400).json({ error: '非法的图纸路径' });
+    }
     if (!fs.existsSync(fullPath)) {
       return res.status(404).json({
         error: '图纸文件不存在',

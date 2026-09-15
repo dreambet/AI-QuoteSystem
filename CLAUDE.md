@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-机加工 AI 智能报价系统：上传 CAD 图纸（DWG/DXF/STEP/STP）-> AI 分析 -> **确认材料/产品规格 + 工序 + 单价** -> 按《成本分析.xls》公式链计算报价 -> AI 预审/人工审核 -> 导出 PDF 报价单。前后端分离单仓库，后端 Node.js + Express + **MySQL**，前端 Create React App + React Router + three.js。
+机加工 AI 智能报价系统：上传 CAD 图纸（DWG/DXF/STEP/STP）-> AI 分析 -> **确认材料/产品规格 + 工序 + 单价** -> 按《成本分析.xls》公式链计算报价 -> AI 预审/人工审核 -> 导出 Excel 核价单。前后端分离单仓库，后端 Node.js + Express + **MySQL**，前端 Create React App + React Router + three.js；生产由后端直接托管 `frontend/build`（app.js 静态托管 + SPA catch-all，单进程 3001 对外），开发仍走 CRA 3000 + proxy。
 
 > ⚠️ **图纸仅支持 CAD 格式（DWG/DXF/STEP/STP）**，PDF/图片上传与 AI 视觉分析链路已整体移除（防泄密），multer `fileFilter` 在 `quotes.js`/`upload.js` 两处拦截非法格式。
 
@@ -71,18 +71,18 @@ W = V × 样品倍率                     // 样品价格（产品5倍率=1，W=
 
 ### 三个「AI/规则」服务，勿混淆
 - **`AIReviewer.js`**（`POST /:id/ai-review`）：纯规则引擎（总价区间、K/T 材料占比、R/T 机加工占比、单价缺失/过期提醒），不调外部 API。状态 `ai_reviewed`。
-- **`DeepSeekService.js`**（`POST /:id/analyze-drawing`、`POST /:id/ai-quote`）：真 LLM 调用（`deepseek-chat` + `json_object`）。fallback 从 `processes` 表取真实工序。**prompt 已移除 complexity 字段**——AI 不再输出复杂程度，前端活跃组件也已无复杂度展示（仅 `LegacyAIQuoteCreation` 死代码里残留引用，未渲染）。
+- **`DeepSeekService.js`**（`POST /:id/analyze-drawing`、`POST /:id/ai-quote`）：真 LLM 调用（`json_object`）。fallback 从 `processes` 表取真实工序。**prompt 已移除 complexity 字段**，前端无任何复杂度展示。env 在模块加载时读取，改配置需重启进程。
 - **`QuoteCalculator.js`**：确定性计算引擎（非 AI）。
 
 ### 路由
-- `/api/quotes`（`routes/quotes.js`）：CRUD + `/:id/calculate` + `/:id/analyze-drawing` + `/:id/ai-quote` + `/:id/ai-review` + `/:id/manual-review` + `/:id/export`(PDF) + `/:id/3d-model`。`GET /` 支持 `?materialCode=&partName=&partDescription=&q=&status=` 追溯过滤；**列表查询是瘦身投影**（`Quote.LIST_SELECT`：只取展示列 + `JSON_EXTRACT` 抽 calculation.total/blankSpec.MOQ/priceSnapshot.unitPrice，勿改回 `SELECT *`--drawingAnalysis 等 LONGTEXT JSON 列单行数百 KB，57 行实测 7MB+）。**无图纸下载端点**——详情页只展示 drawingPath 文件名，唯一文件下载是 PDF 报价单导出（`res.download` 仅用于 PDF）。
+- `/api/quotes`（`routes/quotes.js`）：CRUD + `/:id/calculate` + `/:id/analyze-drawing` + `/:id/ai-quote` + `/:id/ai-review` + `/:id/manual-review` + `/:id/export`(Excel 核价单，QuoteExcelGenerator 代码生成工作簿，服务端校验 manualReview=approved + calculation 存在，临时文件下载后即删) + `/:id/3d-model`。`GET /` 支持 `?materialCode=&partName=&partDescription=&q=&status=` 追溯过滤；**列表查询是瘦身投影**（`Quote.LIST_SELECT`：只取展示列 + `JSON_EXTRACT` 抽 calculation.total/blankSpec.MOQ/priceSnapshot.unitPrice，勿改回 `SELECT *`--drawingAnalysis 等 LONGTEXT JSON 列单行数百 KB，57 行实测 7MB+）。**无图纸下载端点**——详情页只展示 drawingPath 文件名，唯一文件下载是 Excel 核价单导出；analyze-drawing 的 drawingPath 有路径穿越防御（resolve 后必须落在 uploadsDir 内）。上传 multer 有 50MB 大小上限（`MAX_FILE_SIZE` 可覆盖，upload.js/quotes.js 两处一致）。
 - `/api/catalog`（`routes/catalog.js`）：`GET materials`(含 active 价格+stale 标记+priceMode+density)/`processes`/`strategies`/`shapes`；`POST materials`(新增材质，可选 priceMode/density)/`PUT materials/:id`(维护密度)/`materials/:id/prices`(确认单价，写历史)；`POST processes`(新增工站，code CUS- 前缀)/`PUT processes/:id`(改名/改计费类型/改费率)/`DELETE processes/:id`(软删 active=0)；`POST strategies`(新增成本策略，name 唯一校验)/`DELETE strategies/:id`(直接删，已有报价由 processSnapshot 快照保护)/`PUT strategies/:id`(改 name+7率+changeReason 审计)；`POST shapes`(新增形状，name 唯一)/`DELETE shapes/:id`(方块/球体预置不可删)。**已无 part-masters 路由**。
 - `/api/upload`（`routes/upload.js`）：`POST /drawing`（multer 单文件上传）。
 - `/api/assistant`（Dify 聊天代理，与报价无关）。
 - `GET /health`：健康检查 + DeepSeek 配置状态。
 
 ### 报价状态机
-`draft` -> `calculated` -> `ai_reviewed` -> `manually_reviewed` -> `finalized`；AI 报价路径 `ai_quoted`；`rejected`。每个端点写回对应 JSON 并推进 status。PDF 导出需 `manualReview.status === 'approved'`。
+`draft` -> `calculated` -> `ai_reviewed` -> `manually_reviewed` -> `finalized`；AI 报价路径 `ai_quoted`；`rejected`。每个端点写回对应 JSON 并推进 status。Excel 核价单导出需 `manualReview.status === 'approved'` 且已有 calculation（服务端硬校验）。
 
 ### CAD 解析链（`CADParserService.js`）
 - 路由不直接调 CADParserService，而是经 `cadParserPool.js`（`cadParserWorker.js` worker 线程）：occt STEP 网格化是 CPU 密集同步操作，放 worker 避免阻塞事件循环；结果跨线程传 JSON 字符串（结构化克隆大数值数组极慢）；同文件（路径+大小+mtime）结果 LRU 缓存（6 条），重复分析毫秒级；服务启动时 `warmup()` 预载 occt WASM。
@@ -115,7 +115,7 @@ API 集中在 `src/api/quotes.js`：`quoteApi`/`catalogApi`/`uploadApi`，因 CR
 ## 易踩的坑
 
 - **`db.query` 返回数组本身**，勿再 `const [rows]` 解构（见上）。
-- **死代码文件**：`frontend/src/pages/QuoteDetail.js` 是旧版，`App.js` 实际导入 `QuoteDetail.jsx`，以 `.jsx` 为准。`AIQuoteCreation.jsx` 内 `LegacyAIQuoteCreation`（及其引用的 `AnalysisWorkbench`）是旧实现，**未渲染**，里面的 complexity 残留引用不影响线上。
+- **死代码已清理（2026-09-15 上线前）**：旧版 `frontend/src/pages/QuoteDetail.js`、`AIQuoteCreation.jsx` 内 `LegacyAIQuoteCreation`/`AnalysisWorkbench`/`CollapsibleSection`、后端 PDF 生成器 `QuoteGenerator.js` 及 `pdfkit` 依赖均已删除；页面以 `.jsx` 为准。`QuoteExcelGenerator.js` 为当前导出实现（程序化生成，不读模板文件）。
 - **混用扩展名**：新页面 `.jsx`（`AIQuoteCreation`、`QuoteDetail`、`Strategies`），旧页面 `.js`（`QuoteList`）。`App.js` import 显式带扩展名。
 - **手动报价已移除**：原 `QuoteForm.js` 及 `/quotes/new` 路由已删除，改为 `/strategies`（成本策略管理 `Strategies.jsx`，对 pricing_strategies 做 CRUD）。新产品报价统一走 AI 工作台（`/quotes/ai-new`）1-5 步。
 - **`rebuild-db` 会清空数据**；`seed` 幂等可重复执行（`seed.js` 现含 A/B 类无用列与整表清理，删过的列/表重复执行会跳过）。

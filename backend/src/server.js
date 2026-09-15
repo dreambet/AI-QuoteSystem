@@ -21,5 +21,13 @@ async function shutdown(signal) {
   process.exit(0);
 }
 
+// 进程级兜底：游离的 Promise rejection（尤其 SSE 路径）不允许带崩线上进程
+process.on('unhandledRejection', reason => {
+  console.error('Unhandled promise rejection:', reason);
+});
+process.on('uncaughtException', err => {
+  console.error('Uncaught exception:', err);
+});
+
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));

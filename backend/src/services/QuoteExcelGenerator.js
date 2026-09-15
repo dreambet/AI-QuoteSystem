@@ -70,7 +70,7 @@ class QuoteExcelGenerator {
     setMoney('F8', residualPrice, '/');
     setMoney('H8', residualAmount, '/');
 
-    const displayRows = this.buildStationRows(this.collectStations(quote));
+    const { rows: displayRows, omitted } = this.buildStationRows(this.collectStations(quote));
     displayRows.forEach((entry, index) => this.fillStationRow(sheet, 11 + index, entry));
 
     const totalRow = 11 + displayRows.length;
@@ -90,7 +90,7 @@ class QuoteExcelGenerator {
 
     const total = toNumber(calculation.total);
     const noteRow = summaryRow + 1;
-    setText(`C${noteRow}`, `报价总额：${total === null ? '/' : `¥${total.toFixed(2)}`}${residualAmount === null ? '' : '（余料金额仅作记录，不参与报价）'}`);
+    setText(`C${noteRow}`, `报价总额：${total === null ? '/' : `¥${total.toFixed(2)}`}${residualAmount === null ? '' : '（余料金额仅作记录，不参与报价）'}${omitted > 0 ? `；另有 ${omitted} 项自定义工站超出展示槽位未逐一列示，其成本已计入报价总额` : ''}`);
     const quoteRow = noteRow + 1;
     setText(`C${quoteRow}`, `报价：系统导出 / ${formatDate(new Date())}`);
     const approvalRow = quoteRow + 1;
@@ -99,8 +99,14 @@ class QuoteExcelGenerator {
       : '批准：待人工审核');
 
     sheet.pageSetup = { ...sheet.pageSetup, orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0, paperSize: 9, horizontalCentered: true };
-    await fs.mkdir(path.dirname(outputPath), { recursive: true });
-    await workbook.xlsx.writeFile(outputPath);
+    try {
+      await fs.mkdir(path.dirname(outputPath), { recursive: true });
+      await workbook.xlsx.writeFile(outputPath);
+    } catch (err) {
+      // 半途失败会留下损坏文件，删除残留后向上抛由路由统一处理
+      await fs.unlink(outputPath).catch(() => {});
+      throw err;
+    }
     return outputPath;
   }
 
@@ -146,8 +152,9 @@ class QuoteExcelGenerator {
       return remaining.splice(index, 1)[0];
     });
     const customRows = remaining.slice(0, CUSTOM_STATION_SLOTS);
+    const omitted = remaining.length - customRows.length;
     while (customRows.length < CUSTOM_STATION_SLOTS) customRows.push(null);
-    return standardRows.concat(customRows);
+    return { rows: standardRows.concat(customRows), omitted };
   }
 
   static fillStationRow(sheet, row, station) {

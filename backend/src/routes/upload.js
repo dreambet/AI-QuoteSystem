@@ -30,7 +30,9 @@ const storage = multer.diskStorage({
   }
 });
 
-const upload = multer({ storage, fileFilter });
+// 单文件 50MB 上限（CAD 图纸合理上限），防止无限制上传耗尽磁盘
+const MAX_FILE_SIZE = Number(process.env.MAX_FILE_SIZE) || 50 * 1024 * 1024;
+const upload = multer({ storage, fileFilter, limits: { fileSize: MAX_FILE_SIZE } });
 
 router.post('/drawing', upload.single('drawing'), (req, res) => {
   if (!req.file) {
