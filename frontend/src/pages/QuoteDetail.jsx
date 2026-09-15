@@ -57,13 +57,19 @@ function CalculationMethodPanel({ calculation, quantity, priceSnapshot, blankSpe
 function QuoteDetail() {
   const { id } = useParams();
   const [quote, setQuote] = useState(null);
+  const [loadError, setLoadError] = useState('');
   const [reviewData, setReviewData] = useState({ status: 'approved', comments: '' });
   const [showBreakdown, setShowBreakdown] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState('');
   const [reviewing, setReviewing] = useState(false);
 
-  useEffect(() => { quoteApi.getById(id).then(response => setQuote(response.data)); }, [id]);
+  useEffect(() => {
+    setQuote(null); setLoadError('');
+    quoteApi.getById(id)
+      .then(response => setQuote(response.data))
+      .catch(error => setLoadError(error.response?.data?.error || '加载报价任务失败，请稍后重试或返回报价中心。'));
+  }, [id]);
   // 计算方法弹窗打开时锁定背景滚动，避免弹窗内滚动带动详情页面
   useEffect(() => {
     document.body.style.overflow = showBreakdown ? 'hidden' : '';
@@ -135,6 +141,7 @@ function QuoteDetail() {
     } finally { setExporting(false); }
   };
 
+  if (loadError) return <div className="detail-loading">{loadError}<Link className="back-link" to="/quotes">← 返回报价中心</Link></div>;
   if (!quote) return <div className="detail-loading">正在载入报价任务…</div>;
   const analysis = quote.drawingAnalysis || {};
   const aiQuote = quote.aiQuoteAnalysis || {};
