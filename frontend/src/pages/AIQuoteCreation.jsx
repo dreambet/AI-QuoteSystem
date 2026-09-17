@@ -1,7 +1,7 @@
 import React, { useState, useRef, useMemo, useEffect, memo, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { Canvas, useFrame } from '@react-three/fiber';
-import { OrbitControls, Grid, Line, Text } from '@react-three/drei';
+import { Bounds, OrbitControls, Grid, Line, Text } from '@react-three/drei';
 import * as THREE from 'three';
 import { quoteApi, uploadApi, catalogApi } from '../api/quotes';
 
@@ -118,7 +118,7 @@ function FeaturePointMarker({ position, color, selected, onSelect, size = 0.045 
   });
   return (
     <mesh ref={markerRef} position={position} onClick={(event) => { event.stopPropagation(); onSelect(); }}>
-      <boxGeometry args={[selected ? size * 1.35 : size, selected ? size * 1.35 : size, selected ? size * 1.35 : size]} />
+      <sphereGeometry args={[selected ? size * 0.78 : size * 0.58, 24, 16]} />
       <meshStandardMaterial color={color} emissive={color} emissiveIntensity={selected ? 1.05 : 0.35} metalness={0.1} roughness={0.38} />
     </mesh>
   );
@@ -265,18 +265,22 @@ const StepLinePath = memo(function StepLinePath({ path }) {
 });
 
 function StepMeshModel({ model, showEdges, selectedFeature, features, selectedFeatureIndex, onSelectFeature }) {
-  const { center, scale } = useMemo(() => {
+  const { center, scale, markerSize } = useMemo(() => {
     const values = [
       ...(model.meshes || []).flatMap(mesh => mesh.positions || []),
       ...(model.linePaths || []).flatMap(path => path.points || [])
     ];
-    if (!values.length) return { center: [0, 0, 0], scale: 0.02 };
+    if (!values.length) return { center: [0, 0, 0], scale: 0.02, markerSize: 0.045 };
     const xs = [], ys = [], zs = [];
     for (let i = 0; i < values.length; i += 3) { xs.push(values[i]); ys.push(values[i + 1]); zs.push(values[i + 2]); }
+    const maxSpan = Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys), Math.max(...zs) - Math.min(...zs));
+    const scale = 0.02;
     return {
       center: [(Math.min(...xs) + Math.max(...xs)) / 2, (Math.min(...ys) + Math.max(...ys)) / 2, (Math.min(...zs) + Math.max(...zs)) / 2],
-      // 统一按毫米缩放到场景单位；不再根据模型尺寸自动放大相机。
-      scale: 0.02
+      // 统一按毫米缩放到场景单位；相机由 Bounds 按实际模型范围自动适配。
+      scale,
+      // 标记随模型比例变化，同时限制最小/最大尺寸，避免小件看不清或大件标记喧宾夺主。
+      markerSize: THREE.MathUtils.clamp(maxSpan * scale * 0.014, 0.035, 0.11)
     };
   }, [model]);
   const selectedMeshIndex = selectedFeature?.data?.meshIndex;
@@ -304,7 +308,7 @@ function StepMeshModel({ model, showEdges, selectedFeature, features, selectedFe
       {(model.meshes || []).map((mesh, index) => <StepMesh key={`${mesh.name}-${index}`} mesh={mesh} showEdges={showEdges} selected={selectedMeshIndex === index} />)}
       {(model.linePaths || []).map((path, index) => <StepLinePath key={`path-${index}`} path={path} />)}
     </group>
-    <FeaturePointMarkers markers={worldMarkers} selectedFeatureIndex={selectedFeatureIndex} onSelectFeature={onSelectFeature} size={0.042} />
+    <FeaturePointMarkers markers={worldMarkers} selectedFeatureIndex={selectedFeatureIndex} onSelectFeature={onSelectFeature} size={markerSize} />
   </>;
 }
 
@@ -386,7 +390,9 @@ const Part3DPreview = memo(function Part3DPreview({ quoteId, formData, analysisR
         <pointLight position={[5, 3, -5]} intensity={0.3} color="#4a90d9" />
 
         {hasStepModel
-          ? <StepMeshModel model={stepModel} showEdges={showEdges} selectedFeature={features[selectedFeatureIndex] || features[0]} features={features} selectedFeatureIndex={selectedFeatureIndex} onSelectFeature={onSelectFeature} />
+          ? <Bounds fit clip margin={1.3}>
+              <StepMeshModel model={stepModel} showEdges={showEdges} selectedFeature={features[selectedFeatureIndex] || features[0]} features={features} selectedFeatureIndex={selectedFeatureIndex} onSelectFeature={onSelectFeature} />
+            </Bounds>
           : has2DDrawing && <Drawing2DModel features={features} bounds={cadBounds} selectedFeatureIndex={selectedFeatureIndex} onSelectFeature={onSelectFeature} />}
 
         {!has2DDrawing && <Grid
