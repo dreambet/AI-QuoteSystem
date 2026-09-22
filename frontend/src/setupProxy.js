@@ -5,7 +5,7 @@
 // 生产环境同理：反向代理需关闭该路径的缓冲（nginx: proxy_buffering off）。
 module.exports = function (app) {
   app.use('/api/quotes', (req, res, next) => {
-    if (req.path.endsWith('/ai-quote/stream') || req.path.endsWith('/ai-review/stream')) {
+    if (req.path.endsWith('/ai-quote/stream') || req.path.endsWith('/ai-review/stream') || req.path.endsWith('/ai-process-draft/stream')) {
       delete req.headers['accept-encoding'];
     }
     next();

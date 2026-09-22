@@ -96,6 +96,9 @@ class CADParserService {
         throw new Error('STEP 网格数据为空');
       }
       const features = this._extractStepFeatures(meshes);
+      // STEP 实体文本保留了比网格更明确的曲面类型（圆柱/圆锥/环面等）。
+      // 只提取标准实体与其尺寸，不把它们直接解释成孔或具体工艺。
+      const stepSemantics = this._extractStepSemantics(Buffer.from(stepBytes).toString('latin1'));
 
       return {
         success: true,
@@ -104,6 +107,7 @@ class CADParserService {
         bounds: this._calculateMeshBounds(meshes),
         entityCount: features.length,
         features,
+        stepSemantics,
         dimensionAnnotations: [],
         model: { meshes },
         modelInfo: { type: 'mesh', source: 'step', label: '原始三维模型', available: true }
@@ -115,6 +119,44 @@ class CADParserService {
         error: `STEP解析失败: ${error.message || error}`
       };
     }
+  }
+
+  _extractStepSemantics(content) {
+    const entityCount = name => (content.match(new RegExp(`\\b${name}\\s*\\(`, 'gi')) || []).length;
+    const radii = name => {
+      const result = [];
+      const matcher = new RegExp(`\\b${name}\\s*\\(([^;]*?)\\)\\s*;`, 'gi');
+      let match;
+      while ((match = matcher.exec(content))) {
+        // 标准曲面实体的最后一个数值参数为半径；#引用中的数字排在它之前。
+        const values = match[1].match(/[-+]?\d*\.?\d+(?:[Ee][-+]?\d+)?/g) || [];
+        const radius = Number(values[values.length - 1]);
+        if (Number.isFinite(radius) && radius > 0) result.push(radius);
+      }
+      return result;
+    };
+    const groupRadii = values => [...values.reduce((map, value) => {
+      const key = String(Math.round(value * 100) / 100);
+      map.set(key, (map.get(key) || 0) + 1);
+      return map;
+    }, new Map()).entries()].map(([radius, count]) => ({ radius: Number(radius), count })).sort((a, b) => b.count - a.count || a.radius - b.radius);
+    const cylindricalRadii = radii('CYLINDRICAL_SURFACE');
+    const conicalRadii = radii('CONICAL_SURFACE');
+    const toroidalRadii = radii('TOROIDAL_SURFACE');
+    const circleRadii = radii('CIRCLE');
+    return {
+      advancedFaces: entityCount('ADVANCED_FACE'),
+      planes: entityCount('PLANE'),
+      cylindricalSurfaces: cylindricalRadii.length,
+      cylindricalRadii: groupRadii(cylindricalRadii),
+      conicalSurfaces: conicalRadii.length,
+      conicalRadii: groupRadii(conicalRadii),
+      toroidalSurfaces: toroidalRadii.length,
+      toroidalRadii: groupRadii(toroidalRadii),
+      splineSurfaces: entityCount('B_SPLINE_SURFACE') + entityCount('B_SPLINE_SURFACE_WITH_KNOTS'),
+      circularEdges: circleRadii.length,
+      circularRadii: groupRadii(circleRadii)
+    };
   }
 
   /**

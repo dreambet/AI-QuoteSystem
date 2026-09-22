@@ -1,0 +1,26 @@
+/* 第 3 步制造特征卡：等宽自适应网格，充分使用工艺初稿区域的横向空间。 */
+.manufacturing-feature-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.manufacturing-feature-chip {
+  flex: 1 1 210px;
+  min-width: 210px;
+  max-width: none;
+  width: auto;
+}
+
+@media (max-width: 720px) {
+  .manufacturing-feature-chips {
+    display: block;
+  }
+
+  .manufacturing-feature-chip {
+    min-width: 0;
+    width: auto;
+  }
+
+  .manufacturing-feature-chip + .manufacturing-feature-chip { margin-top: 8px; }
+}

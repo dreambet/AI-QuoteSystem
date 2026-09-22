@@ -6,7 +6,9 @@ const QuoteCalculator = require('../services/QuoteCalculator');
 const AIReviewer = require('../services/AIReviewer');
 const QuoteExcelGenerator = require('../services/QuoteExcelGenerator');
 const DeepSeekService = require('../services/DeepSeekService');
+const AIProcessDraftService = require('../services/AIProcessDraftService');
 const cadParserPool = require('../services/cadParserPool');
+const ManufacturingFeatureService = require('../services/ManufacturingFeatureService');
 // 启动即预热解析 worker（加载 occt WASM），首次图纸分析无需叠加初始化耗时
 cadParserPool.warmup().catch(() => {});
 const db = require('../db');
@@ -144,7 +146,12 @@ async function enrichSelection(selection) {
       minutes: num(sel.minutes),
       unitRate: sel.unitRate != null ? num(sel.unitRate) : num(meta.unitRate),
       rate: sel.rate != null ? num(sel.rate) : null,
-      amount: sel.amount != null ? num(sel.amount) : num(meta.fixedAmount)
+      amount: sel.amount != null ? num(sel.amount) : num(meta.fixedAmount),
+      // 工序快照保留图纸建议的来源与依据；计算器只消费费率/时长字段。
+      source: sel.source || '人工确认',
+      basis: sel.basis || null,
+      featureIds: Array.isArray(sel.featureIds) ? sel.featureIds : [],
+      confidence: sel.confidence != null ? num(sel.confidence) : null
     };
   });
 }
@@ -241,6 +248,26 @@ router.post('/:id/calculate', async (req, res) => {
     }
     const resolvedMode = mode === 'fixed' ? 'fixed' : 'weight';
     const yieldPercent = num(yieldRate);
+
+    // 面向界面的字段级校验：让报价员知道缺哪项、去哪里修，而不是只收到 500。
+    const issues = [];
+    if (!quote.material || quote.material === '待确认材料') {
+      issues.push({ field: '材质', message: '尚未确认材质', fix: '在“材料规格（毛坯）”中选择或新增材质。' });
+    }
+    if (!(price > 0)) {
+      issues.push({ field: resolvedMode === 'weight' ? '材料单价' : '材料价格', message: '材料价格必须大于 0', fix: '在“单价确认”中填写最新材料价格，或在材料目录维护有效价格。' });
+    }
+    if (resolvedMode === 'weight' && !(grossWeight > 0)) {
+      issues.push({ field: '毛重', message: '按重量计价时毛重必须大于 0', fix: '填写毛坯规格和密度以自动计算毛重，或直接在“毛重(kg)”中输入确认值。' });
+    }
+    if (selection.some(item => item.costType === 'weight') && !(netWeight > 0)) {
+      issues.push({ field: '净重', message: '已选重量型工序，但净重未填写', fix: '在“产品规格（成品）”中填写净重，或取消该重量型工序。' });
+    }
+    selection.filter(item => item.costType === 'time').forEach(item => {
+      if (!(num(item.minutes) > 0)) issues.push({ field: item.name || item.processCode, message: '加工分钟数必须大于 0', fix: '打开“工序确认”并填写确认后的加工分钟数。' });
+      if (!(num(item.hourlyRate) > 0)) issues.push({ field: item.name || item.processCode, message: '工费率必须大于 0', fix: '打开“工序确认”并填写工费率（元/小时），或移除该工序。' });
+    });
+    if (issues.length) return res.status(422).json({ error: '报价参数待确认', issues });
 
     // 用户第3步手填单价 -> 回写共享目录 material_prices（旧 active 转 historical，新价升为 active）。
     // 失败不阻断计算，仅告警。
@@ -538,6 +565,10 @@ router.post('/:id/analyze-drawing', uploadDrawing.single('drawing'), async (req,
           throw new Error(parseResult.error || 'CAD文件解析失败');
         }
 
+        // 仅用本地几何数据生成制造特征和候选工序；不调用模型、不直接写入报价金额。
+        // 非 STEP/STP 返回空结果，二维格式仍沿用现有轮廓/标注解析与人工确认。
+        const manufacturing = ManufacturingFeatureService.analyze(parseResult);
+
         const dimensions = {
           length: num((quote.blankSpec || {})['料长']) || 100,
           width: num((quote.blankSpec || {})['料宽']) || 50,
@@ -588,6 +619,9 @@ router.post('/:id/analyze-drawing', uploadDrawing.single('drawing'), async (req,
           dimensions,
           quantity: quote.quantity || 1,
           features: parseResult.features || [],
+          manufacturingFeatures: manufacturing.features,
+          processSuggestions: manufacturing.processSuggestions,
+          unresolvedItems: manufacturing.unresolved,
           dimensionAnnotations: dimAnn,
           globalTolerance: parseResult.globalTolerance || null,
           notes: parseResult.message || 'CAD文件已解析，请手动确认参数',
@@ -650,6 +684,73 @@ router.post('/:id/analyze-drawing', uploadDrawing.single('drawing'), async (req,
     });
   }
 });
+
+// 本地 CAD 解析已经落库后，流式生成 AI 工艺初稿。AI 失败始终回退本地规则，不阻断人工确认/报价。
+router.post('/:id/ai-process-draft/stream', async (req, res) => {
+  // 每条事件主动 flush，避免开发代理/部分浏览器等到缓冲区积累后才显示，导致“实时”内容空白。
+  const sse = (event, data) => {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    if (typeof res.flush === 'function') res.flush();
+  };
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders && res.flushHeaders();
+  sse('meta', { stage: 'connecting', message: '正在建立 AI 工艺分析连接…' });
+  let quote;
+  try {
+    quote = await Quote.findById(req.params.id);
+    if (!quote) { sse('error', { message: '报价任务不存在' }); return res.end(); }
+    if (!quote.drawingAnalysis) { sse('error', { message: '请先完成本地 CAD 解析' }); return res.end(); }
+  } catch (error) { sse('error', { message: error.message }); return res.end(); }
+
+  const abort = new AbortController();
+  let clientClosed = false;
+  // 监听响应关闭，而不是 req.close：POST 请求体读取完不代表 SSE 客户端已离开。
+  res.on('close', () => { if (!res.writableEnded) { clientClosed = true; abort.abort(); } });
+  req.on('aborted', () => { clientClosed = true; abort.abort(); });
+  let receivedDelta = false;
+  const heartbeat = setInterval(() => { if (!clientClosed && !res.writableEnded) sse('meta', { stage: 'ai', message: receivedDelta ? 'AI 正在继续生成工艺初稿' : 'AI 请求已发送，正在等待模型返回第一段内容' }); }, 3000);
+  const firstTokenTimer = setTimeout(() => { if (!receivedDelta && !clientClosed) abort.abort('AI 首段输出超时'); }, AIProcessDraftService.firstTokenTimeout);
+  const fallback = async reason => {
+    const analysis = { ...quote.drawingAnalysis, aiProcessDraft: { status: 'fallback', generatedAt: new Date().toISOString(), reason: safeSseReason(reason), validation: 'AI 不可用，使用本地规则初稿' } };
+    const updated = await Quote.update(quote.id, { drawingAnalysis: analysis });
+    const { drawingAnalysis: _skip, ...slimQuote } = updated || {};
+    sse('done', { analysis, quote: slimQuote, fallback: true });
+  };
+  try {
+    const workstations = await db.query('SELECT code, name, costType FROM processes WHERE active = 1 ORDER BY id');
+    const payload = AIProcessDraftService.buildPayload(quote.drawingAnalysis, workstations);
+    sse('meta', { stage: 'ai', message: AIProcessDraftService.isConfigured ? '本地解析完成，已构建脱敏参数并发送给 AI' : 'AI 未配置，正在准备本地规则初稿', inputSummary: AIProcessDraftService.summary(payload) });
+    if (!AIProcessDraftService.isConfigured) { await fallback('AI 工艺初稿未配置'); return res.end(); }
+    console.info('AI 工艺初稿任务开始', { quoteId: quote.id, summary: AIProcessDraftService.summary(payload) });
+    const raw = await AIProcessDraftService.generateStream(payload, { signal: abort.signal, onDelta: (t, kind) => { receivedDelta = true; if (!clientClosed) sse('delta', { t, kind }); } });
+    if (clientClosed) return;
+    const draft = AIProcessDraftService.validate(raw, payload);
+    const analysis = {
+      ...quote.drawingAnalysis,
+      localRuleDraft: { manufacturingFeatures: quote.drawingAnalysis.manufacturingFeatures || [], processSuggestions: quote.drawingAnalysis.processSuggestions || [], unresolvedItems: quote.drawingAnalysis.unresolvedItems || [] },
+      manufacturingFeatures: draft.featureCandidates,
+      processSuggestions: draft.processSuggestions,
+      unresolvedItems: draft.reviewItems,
+      aiProcessDraft: { status: 'ai', generatedAt: new Date().toISOString(), model: AIProcessDraftService.model, inputSummary: AIProcessDraftService.summary(payload), validation: '已通过特征引用、工站与分钟数范围校验', requirementCandidates: draft.requirementCandidates }
+    };
+    const updated = await Quote.update(quote.id, { drawingAnalysis: analysis });
+    const { drawingAnalysis: _skip, ...slimQuote } = updated || {};
+    sse('done', { analysis, quote: slimQuote, fallback: false });
+  } catch (error) {
+    if (!clientClosed) {
+      console.warn('AI 工艺初稿失败，回退本地规则', { quoteId: quote.id, message: error.message });
+      try { await fallback(error.message); } catch (fallbackError) { sse('error', { message: fallbackError.message }); }
+    }
+  } finally { clearInterval(heartbeat); clearTimeout(firstTokenTimer); }
+  res.end();
+});
+
+function safeSseReason(value) {
+  return String(value || 'AI 服务不可用').replace(/[\r\n]+/g, ' ').slice(0, 160);
+}
 
 // ---------- AI 报价建议共享逻辑 ----------
 // AI 输入 = 图纸解析摘要 + 人工确认的材料/产品规格（料长/料宽/料厚/步距/内外径/毛重/净重等）。

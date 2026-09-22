@@ -77,6 +77,14 @@ cp .env.example .env
 ```env
 DEEPSEEK_API_KEY=your_deepseek_api_key_here
 DEEPSEEK_API_BASE=https://api.deepseek.com
+DEEPSEEK_MODEL=deepseek-chat
+# 可选：AI 工艺初稿。调用失败会自动回退本地规则初稿。
+AI_PROCESS_DRAFT_ENABLED=true
+AI_PROCESS_DRAFT_TIMEOUT_MS=60000
+AI_PROCESS_DRAFT_FIRST_TOKEN_TIMEOUT_MS=25000
+# 对支持推理的模型（当前 deepseek-v4-flash）请求实时思考增量
+AI_PROCESS_DRAFT_THINKING_ENABLED=true
+AI_PROCESS_DRAFT_MAX_TOKENS=1800
 UPLOAD_DIR=./uploads
 PORT=3001
 NODE_ENV=development
