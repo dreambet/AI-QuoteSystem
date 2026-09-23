@@ -741,7 +741,6 @@ function FeatureReviewWorkspace({ quoteId, formData, quote, analysisResult, sele
   const features = analysisResult?.features || [];
   const manufacturingFeatures = analysisResult?.manufacturingFeatures || [];
   const processSuggestions = analysisResult?.processSuggestions || [];
-  const unresolvedItems = analysisResult?.unresolvedItems || [];
   const draftIsAi = analysisResult?.aiProcessDraft?.status === 'ai';
   const is2DDrawing = (analysisResult?.modelInfo || analysisResult?.cadInfo?.modelInfo)?.type === 'drawing2d';
   const dimensions = analysisResult?.dimensions || formData;
@@ -781,13 +780,12 @@ function FeatureReviewWorkspace({ quoteId, formData, quote, analysisResult, sele
     <section className="parameter-console">
       <div className="mini-panel-title"><span>参数修正</span><b>参照图纸核对规格与单价</b></div>
       {(manufacturingFeatures.length > 0 || processSuggestions.length > 0) && <div className="cad-quotation-panel">
-        <div className="cad-quotation-heading"><div><span>{draftIsAi ? 'AI 工艺初稿' : '本地图纸工艺初稿'}</span><small>{draftIsAi ? 'AI 已基于脱敏本地解析参数生成建议，并通过本地校验。' : '基于本地几何识别生成建议。'} 采纳后，仍需在工序确认中核对分钟数、费率和工艺适用性。</small></div><div className="cad-quotation-summary"><span><b>{manufacturingFeatures.length}</b> 已识别特征</span><span><b>{processSuggestions.length}</b> 候选工序</span><span className={unresolvedItems.length ? 'needs-review' : ''}><b>{unresolvedItems.length}</b> 待确认项</span></div>{processSuggestions.length > 1 && <button type="button" className="secondary-action" onClick={() => onApplySuggestions()}>采纳全部候选工序</button>}</div>
+        <div className="cad-quotation-heading"><div><span className={`draft-source-badge ${draftIsAi ? 'ai' : 'fallback'}`}>{draftIsAi ? 'AI 工艺初稿' : '本地规则工艺初稿（AI 已降级）'}</span><small>{draftIsAi ? 'AI 已基于脱敏本地解析参数生成建议，并通过本地校验。' : 'AI 服务不可用或结果未通过校验，已切换为本地规则建议。'} 采纳后，仍需在工序确认中核对分钟数、费率和工艺适用性。</small></div><div className="cad-quotation-summary"><span><b>{manufacturingFeatures.length}</b> 已识别特征</span><span><b>{processSuggestions.length}</b> 候选工序</span></div>{processSuggestions.length > 1 && <button type="button" className="secondary-action" onClick={() => onApplySuggestions()}>采纳全部候选工序</button>}</div>
         {manufacturingFeatures.length > 0 && <div className="manufacturing-feature-chips">{manufacturingFeatures.slice(0, 12).map(feature => <button type="button" key={feature.id} className="manufacturing-feature-chip" onClick={() => {
           const index = feature.data?.sourceFeatureIndex != null ? feature.data.sourceFeatureIndex : features.findIndex(item => item.data?.meshIndex === feature.data?.meshIndex && item.data?.faceIndex === feature.data?.faceIndex);
           if (index >= 0) onSelectFeature(index);
         }}><strong>{feature.type}</strong><span>{feature.description}</span><em>置信度 {Math.round((feature.confidence || 0) * 100)}%</em></button>)}</div>}
-        {processSuggestions.map(suggestion => <div className="cad-process-suggestion" key={suggestion.id}><div><strong>{suggestion.name}</strong><span>建议 {suggestion.minutes} 分钟 · 置信度 {Math.round((suggestion.confidence || 0) * 100)}%</span><small>{suggestion.basis}</small>{suggestion.timeFormula && <small>工时规则：{suggestion.timeFormula}</small>}{suggestion.costFormula && <small>计价规则：{suggestion.costFormula}</small>}</div><button type="button" className="detail-ghost-button" onClick={() => onApplySuggestions([suggestion])}>采纳</button></div>)}
-        {unresolvedItems.length > 0 && <div className="cad-unresolved-items">{unresolvedItems.map(item => <p key={item}>⚠ {item}</p>)}</div>}
+        {processSuggestions.length > 0 && <details className="cad-process-stack"><summary><div><strong>全部建议工序</strong><span>共 {processSuggestions.length} 项 · 点击查看具体内容</span></div></summary><div className="cad-process-stack-list">{processSuggestions.map(suggestion => <div className="cad-process-suggestion" key={suggestion.id}><div><strong>{suggestion.name}</strong><span>建议 {suggestion.minutes} 分钟 · 置信度 {Math.round((suggestion.confidence || 0) * 100)}%</span><small>{suggestion.basis}</small>{suggestion.timeFormula && <small>工时规则：{suggestion.timeFormula}</small>}{suggestion.costFormula && <small>计价规则：{suggestion.costFormula}</small>}</div><button type="button" className="detail-ghost-button" onClick={() => onApplySuggestions([suggestion])}>采纳</button></div>)}</div></details>}
       </div>}
       <div className="spec-section">
         <div className="spec-section-title">基本信息</div>
@@ -974,6 +972,10 @@ function AIQuoteCreation() {
   const reasoningPreRef = useRef(null);
   const reasoningStickRef = useRef(true);
   const reasoningAutoScrollAtRef = useRef(0);
+  // 结构化初稿输出区同样支持自动吸底；用户手动上滚查看时不强制拉回底部。
+  const draftOutputPreRef = useRef(null);
+  const draftOutputStickRef = useRef(true);
+  const draftOutputAutoScrollAtRef = useRef(0);
   useEffect(() => {
     const el = reasoningPreRef.current;
     if (el && reasoningStickRef.current) {
@@ -986,6 +988,19 @@ function AIQuoteCreation() {
     const el = reasoningPreRef.current;
     if (!el) return;
     reasoningStickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 30;
+  };
+  useEffect(() => {
+    const el = draftOutputPreRef.current;
+    if (el && draftOutputStickRef.current) {
+      draftOutputAutoScrollAtRef.current = Date.now();
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [draftStream?.text]);
+  const handleDraftOutputScroll = () => {
+    if (Date.now() - draftOutputAutoScrollAtRef.current < 120) return;
+    const el = draftOutputPreRef.current;
+    if (!el) return;
+    draftOutputStickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 30;
   };
   // 组件卸载（跳转详情/列表页）时中止进行中的流式生成
   useEffect(() => () => {
@@ -1243,11 +1258,15 @@ function AIQuoteCreation() {
       localResult = response.data;
       const controller = new AbortController();
       draftStreamAbortRef.current = controller;
+      draftOutputStickRef.current = true;
       setDraftStream({ active: true, phase: 'ai', activity: ['本地 CAD 解析完成', '已提取特征候选与尺寸摘要', '正在构建脱敏 AI 输入…'], text: '', reasoning: '' });
       let completed = false;
       await quoteApi.aiProcessDraftStream(quoteId, {
         onMeta: data => setDraftStream(current => current ? { ...current, activity: [...(current.activity || []), data.message].filter((item, index, list) => item && list.indexOf(item) === index).slice(-5) } : current),
-        onDelta: (t, kind) => setDraftStream(current => current ? (kind === 'reasoning' ? { ...current, reasoning: (current.reasoning || '') + t } : { ...current, text: (current.text || '') + t }) : current),
+        // 思考与结构化初稿分区呈现：思考结束后，模型输出的 JSON 初稿会在下方实时回填。
+        onDelta: (t, kind) => setDraftStream(current => current ? (kind === 'reasoning'
+          ? { ...current, reasoning: (current.reasoning || '') + t }
+          : { ...current, text: (current.text || '') + t }) : current),
         onDone: data => { completed = true; applyAnalysis(data); setDraftStream(null); setStep(3); },
         onError: data => { throw new Error(data.message || 'AI 工艺初稿生成失败'); }
       }, controller.signal);
@@ -1406,9 +1425,9 @@ function AIQuoteCreation() {
   const renderStep2 = () => {
     if (draftStream?.active) {
       const activity = draftStream.activity || [];
-      const output = draftStream.text || '';
       const reasoning = draftStream.reasoning || '';
-      return <div className="step-workspace"><WorkspaceTitle eyebrow="STEP 02 / AI PROCESS DRAFT" title="正在生成 AI 工艺初稿" description="本地解析、AI 工艺理解和初稿生成均在此实时展示；完成后才进入人工确认。" badge={draftStream.phase === 'local' ? '本地解析中' : 'AI 生成中'} /><div className="stream-status"><span className="stream-dot" />{output ? `AI 正在逐步生成初稿 · 已输出 ${output.length} 字` : (reasoning ? `AI 正在思考工艺路径 · 已输出 ${reasoning.length} 字` : 'AI 正在处理图纸结构化参数…')}</div><section className="draft-activity"><h3>处理进度</h3><ol>{activity.map((item, index) => <li key={`${item}-${index}`}>{item}</li>)}</ol></section><details className="stream-reasoning" open><summary>AI 思考过程（实时）</summary><pre ref={reasoningPreRef} onScroll={handleReasoningScroll}>{reasoning || '正在等待 AI 返回推理内容…'}</pre></details><section className="draft-live-output"><h3>AI 工艺初稿</h3>{output ? <pre>{output}</pre> : <div className="stream-empty-state"><div className="skeleton-line" /><div className="skeleton-line" style={{ width: '78%' }} /><div className="skeleton-line" style={{ width: '56%' }} /></div>}</section><div className="workspace-actions"><button type="button" className="secondary-action" onClick={abortDraftStream}>取消生成</button></div></div>;
+      const output = draftStream.text || '';
+      return <div className="step-workspace"><WorkspaceTitle eyebrow="STEP 02 / AI PROCESS DRAFT" title="正在生成 AI 工艺初稿" description="本地解析与 AI 工艺理解在此实时展示；完成后将直接进入人工确认。" badge={draftStream.phase === 'local' ? '本地解析中' : 'AI 生成中'} /><div className="stream-status"><span className="stream-dot" />{output ? `AI 正在逐步生成初稿 · 已输出 ${output.length} 字` : (reasoning ? `AI 正在思考工艺路径 · 已输出 ${reasoning.length} 字` : 'AI 正在处理图纸结构化参数…')}</div><section className="draft-activity"><h3>处理进度</h3><ol>{activity.map((item, index) => <li key={`${item}-${index}`}>{item}</li>)}</ol></section><details className="stream-reasoning" open><summary>AI 思考过程（实时）</summary><pre ref={reasoningPreRef} onScroll={handleReasoningScroll}>{reasoning || '正在等待 AI 返回推理内容…'}</pre></details><section className="draft-live-output"><h3>AI 工艺初稿</h3>{output ? <pre ref={draftOutputPreRef} onScroll={handleDraftOutputScroll}>{output}</pre> : <div className="stream-empty-state draft-output-pending"><span>正在等待 AI 输出结构化工艺初稿…</span><small>思考完成后，初稿会在此逐步显示。</small><div className="skeleton-line" /><div className="skeleton-line" style={{ width: '78%' }} /><div className="skeleton-line" style={{ width: '56%' }} /></div>}</section><div className="workspace-actions"><button type="button" className="secondary-action" onClick={abortDraftStream}>取消生成</button></div></div>;
     }
     return <div className="step-workspace"><WorkspaceTitle eyebrow="STEP 02 / AI PARSING" title="本地解析与 AI 工艺理解" description="先从本地图纸提取几何和制造特征，再以脱敏结构化参数生成待确认的 AI 工艺初稿。" badge={fileExtension(quote?.drawingPath)} /><div className="analysis-command"><div className="command-orb">AI</div><div><span className="eyebrow">READY TO ANALYZE</span><h3>{fileName(quote?.drawingPath)}</h3><p>开始后会留在本页展示处理进度和逐步生成的初稿；初稿完成后才进入人工确认。</p></div><button type="button" className="primary-action" onClick={analyzeDrawing} disabled={loading}>{loading ? '正在准备…' : '开始解析并生成初稿'}</button></div><div className="status-card-grid"><div><span>输入格式</span><strong>{fileExtension(quote?.drawingPath)}</strong><small>CAD 文件已就绪</small></div><div><span>解析范围</span><strong>几何 + 特征</strong><small>尺寸、轮廓、曲面摘要</small></div><div><span>下一节点</span><strong>人工确认</strong><small>初稿完成后进入</small></div></div><div className="workspace-actions"><button type="button" className="secondary-action" onClick={() => setStep(1)}>返回上传</button></div></div>;
   };

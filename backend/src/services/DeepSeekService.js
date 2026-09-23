@@ -7,6 +7,8 @@ class DeepSeekService {
     this.baseUrl = process.env.DEEPSEEK_API_BASE || 'https://api.deepseek.com';
     this.model = process.env.DEEPSEEK_MODEL || 'deepseek-chat';
     this.isConfigured = !!this.apiKey;
+    this.quoteMaxTokens = Math.max(900, Number(process.env.AI_QUOTE_MAX_TOKENS) || 1600);
+    this.reviewMaxTokens = Math.max(1000, Number(process.env.AI_REVIEW_MAX_TOKENS) || 1800);
   }
 
   // 报价建议共享的消息构造（非流式/流式同一份 prompt，保证行为一致）
@@ -17,14 +19,14 @@ class DeepSeekService {
         content: `你是一个专业的机加工报价工程师。根据提供的零件参数，给出详细的报价分析建议。
 
 输入数据说明：
-- materialSpec（材料规格/毛坯）与 productSpec（产品规格/成品）中的料长、料宽、料厚、步距、外径、毛重、净重等是**人工确认后的准确值**，优先于图纸解析的 dimensions 估算值，请以它们为准。
-- grossWeight/netWeight 为确认后的毛重(kg)/净重(kg)；featureSummary 为图纸特征分类计数，featureDetails 为代表性特征明细。
-- 输入中不包含材料单价信息，请勿猜测或要求具体单价，报价判断基于几何、工序与重量。
+- confirmedSpecs 和 weightsKg 是人工确认后的准确值，优先于 envelopeMm 的解析估算值。
+- keyDimensions、featureSummary、representativeFeatures 和 technicalRequirements 是已筛选的制造事实；confirmedProcesses 为人工已确认的工序与时长。
+- 输入中不包含任何材料单价、报价金额或客户标识。不得猜测金额、总价范围或要求补充价格。
 
 输出精简要求（用户在界面等待，务必控制篇幅）：
-- processSuggestions 最多5条，每条 reason 不超过40字
+- processSuggestions 最多5条，每条 reason 不超过40字；优先评价已确认工序是否充分，不要凭空新增不具备依据的工艺
 - warningPoints、suggestions 各最多4条，每条一句话
-- priceAnalysis 各字段一句话
+- materialRecommendation 仅说明材料/毛坯是否需要工艺核对，不推荐材料单价
 
 请以JSON格式返回：
 {
@@ -36,12 +38,6 @@ class DeepSeekService {
       "estimatedTime": "预估时间（小时）"
     }
   ],
-  "priceAnalysis": {
-    "materialCost": "材料成本说明",
-    "laborCost": "人工成本说明",
-    "equipmentCost": "设备费用说明",
-    "totalEstimation": "总价预估范围"
-  },
   "warningPoints": ["注意事项1", "注意事项2"],
   "suggestions": ["优化建议1", "优化建议2"]
 }
@@ -69,8 +65,8 @@ ${JSON.stringify(quoteData, null, 2)}`
         {
           model: this.model,
           messages: this._quoteMessages(quoteData),
-          temperature: 0.7,
-          max_tokens: 2500,
+          temperature: 0.3,
+          max_tokens: this.quoteMaxTokens,
         },
         {
           headers: {
@@ -102,7 +98,7 @@ ${JSON.stringify(quoteData, null, 2)}`
         content: `你是机加工报价单的交付前质检员。报价由确定性公式计算（不会错），你检查的是人工确认环节的疏漏。只报告有具体依据的问题，不做泛化建议。
 
 检测维度（按优先级）：
-1. 工序完整性：partDescription/partName 中的表面处理关键词（酸洗钝化/阳极/镀镍/镭雕/热处理等）在 processes 中是否遗漏；材料牌号常见配套工艺（如 S31603 需酸洗钝化）是否缺失。
+1. 工序完整性：technicalRequirements 中的表面处理/热处理/去毛刺等明确要求在 processes 中是否遗漏；材料牌号的常见配套工艺仅在有明确依据时提示。
 2. 特征-工序匹配：featureSummary 中的孔/槽特征数量与已选加工工序是否匹配（如大量孔位却无任何孔加工工序）。
 3. 加工时长合理性：processes 的 minutes 与规格（料长/外径/毛重）和特征复杂度是否相称（如料长12mm车床90分钟）。
 4. 规格自洽：毛重<净重、毛重/净重>3、方料与圆料规格同填冲突、MOQ=1却收调机费等矛盾。
@@ -113,7 +109,7 @@ ${JSON.stringify(quoteData, null, 2)}`
 - 只输出确实存在的问题，宁缺毋滥；没有问题返回空 findings 并在 summary 说明"未发现明显疏漏"。
 - 每条 finding 的 location 必须是以下之一："工序确认"、"材料规格"、"产品规格"、"基本信息"。
 - message 一句话（≤50字），evidence 引用具体输入字段值作为依据。
-- 最多输出8条，按 severity（high/medium/low）降序。
+- 最多输出6条，按 severity（high/medium/low）降序；不要重复本地规则已能直接判断的金额或公式问题。
 
 以JSON格式返回：
 {
@@ -175,7 +171,7 @@ ${JSON.stringify(quoteData, null, 2)}`
     try {
       const response = await axios.post(
         `${this.baseUrl}/chat/completions`,
-        { model: this.model, messages: this._semanticMessages(payload), temperature: 0.2, max_tokens: 4000 },
+        { model: this.model, messages: this._semanticMessages(payload), temperature: 0.1, max_tokens: this.reviewMaxTokens },
         {
           headers: {
             'Authorization': `Bearer ${this.apiKey}`,
@@ -200,7 +196,7 @@ ${JSON.stringify(quoteData, null, 2)}`
     try {
       response = await axios.post(
         `${this.baseUrl}/chat/completions`,
-        { model: this.model, messages: this._semanticMessages(payload), temperature: 0.2, max_tokens: 4000, stream: true },
+        { model: this.model, messages: this._semanticMessages(payload), temperature: 0.1, max_tokens: this.reviewMaxTokens, stream: true },
         {
           headers: {
             'Authorization': `Bearer ${this.apiKey}`,
@@ -241,8 +237,8 @@ ${JSON.stringify(quoteData, null, 2)}`
         {
           model: this.model,
           messages: this._quoteMessages(quoteData),
-          temperature: 0.7,
-          max_tokens: 2500,
+          temperature: 0.3,
+          max_tokens: this.quoteMaxTokens,
           stream: true
         },
         {
@@ -273,7 +269,7 @@ ${JSON.stringify(quoteData, null, 2)}`
       return this.parseJsonContent(result.content);
     } catch (e) {
       console.error('AI返回JSON解析失败(流式):', e.message);
-      return { rawText: full };
+      return { rawText: result.content };
     }
   }
 

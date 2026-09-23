@@ -49,6 +49,49 @@ const num = (value, fallback = 0) => {
   const n = typeof value === 'string' ? parseFloat(value) : Number(value);
   return Number.isFinite(n) ? n : fallback;
 };
+// AI 仅需要已确认的制造规格。集中白名单避免把余料单价、空字段或任意新增表单字段传给外部模型。
+const AI_BLANK_SPEC_KEYS = ['材质', '形状', '料长', '料宽', '料厚', '外径', '内径', '步距', '毛重', 'MOQ'];
+const AI_FINISHED_SPEC_KEYS = ['料长', '料宽', '料厚', '外径', '内径', '步距', '净重'];
+const AI_DIMENSION_KEYS = ['length', 'width', 'height', 'diameter'];
+const TECHNICAL_REQUIREMENT_PATTERN = /粗糙|(?:\bra|rz)\s*\d|公差|平面度|平行度|垂直度|同轴度|圆度|跳动|螺纹|攻牙|热处理|淬火|回火|渗碳|氮化|镀|阳极|喷砂|抛光|发黑|磷化|酸洗|钝化|去毛刺|倒角|镭雕/i;
+const compactAiText = (value, limit = 80) => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, limit);
+const compactAiObject = (source, keys) => keys.reduce((out, key) => {
+  const value = source && source[key];
+  if (value !== undefined && value !== null && String(value).trim() !== '') out[key] = compactAiText(value, 32);
+  return out;
+}, {});
+const summarizeFeatureTypes = features => Object.entries((features || []).reduce((out, feature) => {
+  const type = compactAiText(feature?.type || '其他', 32) || '其他';
+  out[type] = (out[type] || 0) + 1;
+  return out;
+}, {})).sort((a, b) => b[1] - a[1]).slice(0, 16).reduce((out, [type, count]) => ({ ...out, [type]: count }), {});
+const representativeFeatures = features => {
+  const ranked = (features || []).map(feature => {
+    const type = compactAiText(feature?.type || '其他', 32);
+    const description = compactAiText(feature?.description, 88);
+    const key = `${type}|${description}`;
+    const priority = /孔|槽|腔|螺纹|倒角|圆角|曲面|薄壁|平面/i.test(key) ? 1 : 0;
+    return { type, description, key, priority };
+  }).filter(item => item.type || item.description).sort((a, b) => b.priority - a.priority);
+  const seen = new Set();
+  return ranked.filter(item => !seen.has(item.key) && seen.add(item.key)).slice(0, 8).map(({ type, description }) => ({ type, description }));
+};
+const toleranceMagnitude = value => {
+  const match = compactAiText(value, 40).match(/(?:±|\+\/-|\+|-)\s*(\d+(?:\.\d+)?)/);
+  return match ? Number(match[1]) : null;
+};
+const keyDimensionsForAi = annotations => (annotations || []).filter(item => item?.value != null).map(item => {
+  const type = compactAiText(item.type || '尺寸', 24);
+  const tolerance = compactAiText(item.tolerance, 32);
+  const magnitude = toleranceMagnitude(tolerance);
+  const featurePriority = /孔|直径|半径|深度|螺纹|槽/i.test(type) ? 20 : 0;
+  const tolerancePriority = magnitude == null ? 0 : magnitude <= 0.02 ? 100 : magnitude <= 0.05 ? 70 : 35;
+  return { type, value: compactAiText(item.value, 24), ...(tolerance ? { tolerance } : {}), score: tolerancePriority + featurePriority };
+}).sort((a, b) => b.score - a.score).slice(0, 8).map(({ score, ...item }) => item);
+const technicalRequirementsForAi = values => {
+  const candidates = (values || []).flatMap(value => String(value || '').split(/[\r\n；;。]/)).map(item => compactAiText(item, 100)).filter(item => item && TECHNICAL_REQUIREMENT_PATTERN.test(item));
+  return [...new Set(candidates)].slice(0, 6);
+};
 const STALE_DAYS = 30;
 const isStale = confirmedAt => !confirmedAt || (Date.now() - new Date(confirmedAt).getTime()) > STALE_DAYS * 86400000;
 
@@ -753,64 +796,57 @@ function safeSseReason(value) {
 }
 
 // ---------- AI 报价建议共享逻辑 ----------
-// AI 输入 = 图纸解析摘要 + 人工确认的材料/产品规格（料长/料宽/料厚/步距/内外径/毛重/净重等）。
-// 单价快照 priceSnapshot 不发送，材料单价不可上传给 AI。
-// 特征全量列表（可达80+条/16KB+）压缩为分类计数+有限明细，输入 token 是 LLM 响应时长的主要成分。
+// 报价建议输入白名单：以人工确认规格、已选工序和关键制造事实为主。
+// 原始 CAD、文件名、客户信息、材料单价、报价金额、余料单价、全量特征及解析备注均不进入模型。
 function buildAiQuotePayload(quote) {
   const da = quote.drawingAnalysis || {};
   const features = Array.isArray(da.features) ? da.features : [];
-  const featureSummary = {};
-  features.forEach(f => { const key = f.type || '其他'; featureSummary[key] = (featureSummary[key] || 0) + 1; });
   return {
-    partName: da.partName || quote.partName,
-    material: da.material || quote.material,
-    dimensions: da.dimensions,
-    quantity: quote.quantity,
-    materialCode: quote.materialCode,
-    grossWeight: quote.grossWeight,
-    netWeight: quote.netWeight,
-    materialSpec: quote.blankSpec || {},
-    productSpec: quote.finishedSpec || {},
-    globalTolerance: da.globalTolerance || null,
-    featureSummary,
-    featureDetails: features.slice(0, 15).map(f => [f.type, f.description].filter(Boolean).join(' ')),
-    notes: da.notes
+    inputVersion: 'quote-advice-v2',
+    material: compactAiText(quote.material || da.material, 48) || null,
+    quantity: Math.max(1, num(quote.quantity, 1)),
+    weightsKg: { gross: num(quote.grossWeight, 0) || null, net: num(quote.netWeight, 0) || null },
+    confirmedSpecs: {
+      blank: compactAiObject(quote.blankSpec, AI_BLANK_SPEC_KEYS),
+      finished: compactAiObject(quote.finishedSpec, AI_FINISHED_SPEC_KEYS)
+    },
+    envelopeMm: compactAiObject(da.dimensions, AI_DIMENSION_KEYS),
+    globalTolerance: compactAiText(da.globalTolerance, 32) || null,
+    keyDimensions: keyDimensionsForAi(da.dimensionAnnotations),
+    featureSummary: summarizeFeatureTypes(features),
+    representativeFeatures: representativeFeatures(features),
+    technicalRequirements: technicalRequirementsForAi([quote.partDescription, da.notes]),
+    confirmedProcesses: ((quote.processSnapshot && quote.processSnapshot.processSelection) || []).filter(item => item?.name).slice(0, 12).map(item => ({ name: compactAiText(item.name, 48), costType: item.costType, ...(item.costType === 'time' && item.minutes != null ? { minutes: num(item.minutes, 0) } : {}) }))
   };
 }
 
-// 语义审核输入白名单（零价格）：规格/工序/公差/特征 + 本地基线层结论（枚举/倍数）。
-// priceSnapshot/finalUnitPrice/calculation 金额等价格信息物理隔离，不进入序列化。
+// 语义审核输入白名单（零价格）：只带与人工确认疏漏相关的规格、工序、关键公差、特征和本地基线结论。
 function buildSemanticReviewPayload(quote, baseline) {
   const da = quote.drawingAnalysis || {};
   const features = Array.isArray(da.features) ? da.features : [];
-  const featureSummary = {};
-  features.forEach(f => { const key = f.type || '其他'; featureSummary[key] = (featureSummary[key] || 0) + 1; });
-  const keyDimensions = (Array.isArray(da.dimensionAnnotations) ? da.dimensionAnnotations : [])
-    .filter(d => d.value != null)
-    .slice(0, 5)
-    .map(d => `${d.type || '尺寸'}:${d.value}${d.tolerance ? `(公差${d.tolerance})` : ''}`);
   return {
-    partName: quote.partName,
-    partDescription: quote.partDescription,
-    material: quote.material,
-    materialCode: quote.materialCode,
-    blankSpec: quote.blankSpec || {},
-    finishedSpec: quote.finishedSpec || {},
-    globalTolerance: da.globalTolerance || null,
-    keyDimensions,
-    featureSummary,
-    processes: ((quote.processSnapshot && quote.processSnapshot.processSelection) || []).map(p => ({
-      name: p.name,
+    inputVersion: 'semantic-review-v2',
+    material: compactAiText(quote.material, 48) || null,
+    confirmedSpecs: {
+      blank: compactAiObject(quote.blankSpec, AI_BLANK_SPEC_KEYS),
+      finished: compactAiObject(quote.finishedSpec, AI_FINISHED_SPEC_KEYS)
+    },
+    globalTolerance: compactAiText(da.globalTolerance, 32) || null,
+    keyDimensions: keyDimensionsForAi(da.dimensionAnnotations),
+    technicalRequirements: technicalRequirementsForAi([quote.partDescription, da.notes]),
+    featureSummary: summarizeFeatureTypes(features),
+    processes: ((quote.processSnapshot && quote.processSnapshot.processSelection) || []).filter(p => p?.name).slice(0, 12).map(p => ({
+      name: compactAiText(p.name, 48),
       costType: p.costType,
       minutes: p.minutes != null ? Number(p.minutes) : null
     })),
-    quantity: quote.quantity,
+    quantity: Math.max(1, num(quote.quantity, 1)),
     setupFeeApplied: Number(quote.calculation && quote.calculation.setupFee) > 0,
     history: baseline ? {
       firstQuote: !!baseline.firstQuote,
-      unitPriceDeviation: baseline.deviation || null,          // 枚举：高/偏高/正常
-      processDiff: baseline.processDiff || null,               // 文本：较历史增减的工序名
-      durationAnomalies: baseline.durationFlags || []          // [{process, multiple}] 倍数非价格
+      unitPriceDeviation: baseline.deviation || null,
+      processDiff: compactAiText(baseline.processDiff, 120) || null,
+      durationAnomalies: (baseline.durationFlags || []).slice(0, 5).map(item => ({ process: compactAiText(item.process, 48), multiple: item.multiple }))
     } : null
   };
 }

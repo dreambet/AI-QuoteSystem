@@ -6,6 +6,15 @@ const safeNumber = (value, fallback = null) => {
   return Number.isFinite(number) ? number : fallback;
 };
 const clamp = (value, min, max, fallback) => Math.min(max, Math.max(min, safeNumber(value, fallback)));
+const formatTolerance = value => {
+  if (value && typeof value === 'object') {
+    const upper = safeText(value.upper, 20);
+    const lower = safeText(value.lower, 20);
+    const signedUpper = upper && (upper.startsWith('-') || upper.startsWith('+') ? upper : `+${upper}`);
+    return [signedUpper, lower].filter(Boolean).join('/') || '';
+  }
+  return safeText(value, 40);
+};
 
 // 只接受本地 CAD 服务生成的结构化事实；此服务从不读取 CAD 原文件、文件名、客户资料或报价价格。
 class AIProcessDraftService {
@@ -18,7 +27,9 @@ class AIProcessDraftService {
     this.firstTokenTimeout = Math.max(8000, Number(process.env.AI_PROCESS_DRAFT_FIRST_TOKEN_TIMEOUT_MS) || 25000);
     // deepseek-v4-flash 在兼容网关中需要显式请求，才会稳定返回推理增量。
     this.thinkingEnabled = process.env.AI_PROCESS_DRAFT_THINKING_ENABLED !== 'false';
-    this.maxTokens = Math.max(800, Number(process.env.AI_PROCESS_DRAFT_MAX_TOKENS) || 1800);
+    // 思考内容和结构化结果共用输出额度。结合下方的条目上限，2400 可避免复杂件 JSON 被截断，
+    // 又不会因无边界输出拖慢首稿生成。
+    this.maxTokens = Math.max(800, Number(process.env.AI_PROCESS_DRAFT_MAX_TOKENS) || 2400);
   }
 
   get isConfigured() { return this.enabled && !!this.apiKey; }
@@ -30,29 +41,57 @@ class AIProcessDraftService {
       out[type] = (out[type] || 0) + 1;
       return out;
     }, {});
-    const radiusFacts = (items, prefix, type) => (Array.isArray(items) ? items : []).slice(0, 16).map((item, index) => ({ id: `${prefix}-${index + 1}`, type, radiusMm: safeNumber(item.radius), count: safeNumber(item.count, 0) }));
-    // 直接来自 CAD 解析的曲面、半径组、实体统计；不包含 manufacturingFeatures 本地规则候选。
+    // 高频半径能反映重复孔/轴类特征；同时保留最小、最大值以免丢失关键细节。
+    // 与逐面、逐半径全量传输相比，保留工艺判断价值而大幅减少无意义上下文。
+    const radiusFacts = (items, prefix, type) => {
+      const all = (Array.isArray(items) ? items : []).map(item => ({
+        radiusMm: safeNumber(item.radius), count: safeNumber(item.count, 0)
+      })).filter(item => item.radiusMm != null && item.count > 0);
+      const selected = [...all].sort((a, b) => b.count - a.count).slice(0, 6);
+      const extremes = [...all].sort((a, b) => a.radiusMm - b.radiusMm);
+      [extremes[0], extremes[extremes.length - 1]].filter(Boolean).forEach(item => {
+        if (!selected.some(existing => existing.radiusMm === item.radiusMm)) selected.push(item);
+      });
+      return selected.slice(0, 8).map((item, index) => ({ id: `${prefix}-${index + 1}`, type, ...item }));
+    };
+    const is2DDrawing = ['DXF', 'DWG'].includes(safeText(analysis.cadInfo?.format, 20).toUpperCase());
+    const entityCount = safeNumber(analysis.cadInfo?.entityCount, 0);
+    const complexityLevel = entityCount >= 1000 ? '高' : entityCount >= 250 ? '中' : '低';
+    // 二维图纸往往把工艺要求写在 TEXT/MTEXT 中；只提取与制造相关的文字，
+    // 不传标题栏、图号或客户等非工艺信息。
+    const technicalTextPattern = /(?:粗糙度|Ra\b|Rz\b|热处理|淬火|回火|氮化|渗碳|阳极|氧化|镀|喷砂|喷涂|发黑|去毛刺|倒角|公差|HRC|HBW?|材质|材料|SUS\d+|Q\d+|\bAL\d*\b)/i;
+    const technicalRequirements = (Array.isArray(analysis.features) ? analysis.features : [])
+      .filter(item => item.type === '文本')
+      .map(item => safeText(item.description, 160))
+      .filter(text => technicalTextPattern.test(text))
+      .filter((text, index, list) => list.indexOf(text) === index)
+      .slice(0, 8);
+    // 直接来自 CAD 解析的曲面、半径组、二维实体统计；不包含 manufacturingFeatures 本地规则候选。
+    // STEP 的 B-Rep 面类型通常只是技术噪声，二维图纸的圆/圆弧/多段线则保留为有效工程语义。
     const geometryFacts = [
       { id: 'surface-plane', type: '平面', count: safeNumber(semantics.planes, 0) },
       { id: 'surface-cylinder', type: '圆柱面', count: safeNumber(semantics.cylindricalSurfaces ?? semantics.cylinders, 0) },
       { id: 'surface-cone', type: '圆锥面', count: safeNumber(semantics.conicalSurfaces ?? semantics.cones, 0) },
+      { id: 'surface-torus', type: '圆环面', count: safeNumber(semantics.toroidalSurfaces ?? semantics.toruses, 0) },
       { id: 'surface-spline', type: '样条曲面', count: safeNumber(semantics.splineSurfaces ?? semantics.splines, 0) },
       { id: 'edge-circular', type: '圆边', count: safeNumber(semantics.circularEdges, 0) },
       ...radiusFacts(semantics.cylindricalRadii, 'cylinder-radius', '圆柱半径组'),
       ...radiusFacts(semantics.conicalRadii, 'cone-radius', '圆锥半径组'),
       ...radiusFacts(semantics.circularRadii, 'circle-radius', '圆边半径组'),
-      ...Object.entries(rawCounts).slice(0, 16).map(([type, count], index) => ({ id: `entity-${index + 1}`, type, count }))
+      ...(is2DDrawing ? Object.entries(rawCounts).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([type, count], index) => ({ id: `entity-${index + 1}`, type, count })) : [])
     ].filter(item => item.count > 0);
     return {
       drawing: {
         format: safeText(analysis.cadInfo?.format || 'CAD', 20),
         dimensionsMm: analysis.dimensions || {},
-        dimensions: (analysis.dimensionAnnotations || []).slice(0, 24).map(item => ({ type: safeText(item.type, 24), value: safeNumber(item.value), tolerance: safeText(item.tolerance, 40) })),
-        tolerance: safeText(analysis.globalTolerance, 60),
-        surfaceSummary: { advancedFaces: safeNumber(semantics.advancedFaces, 0), planes: safeNumber(semantics.planes, 0), cylinders: safeNumber(semantics.cylindricalSurfaces ?? semantics.cylinders, 0), cones: safeNumber(semantics.conicalSurfaces ?? semantics.cones, 0), splines: safeNumber(semantics.splineSurfaces ?? semantics.splines, 0) }
+        dimensions: (analysis.dimensionAnnotations || []).slice(0, 24).map(item => ({ type: safeText(item.type, 24), value: safeNumber(item.value), tolerance: formatTolerance(item.tolerance) })),
+        tolerance: formatTolerance(analysis.globalTolerance),
+        technicalRequirements,
+        surfaceSummary: { advancedFaces: safeNumber(semantics.advancedFaces, 0), planes: safeNumber(semantics.planes, 0), cylinders: safeNumber(semantics.cylindricalSurfaces ?? semantics.cylinders, 0), cones: safeNumber(semantics.conicalSurfaces ?? semantics.cones, 0), splines: safeNumber(semantics.splineSurfaces ?? semantics.splines, 0) },
+        geometryComplexity: { entityCount, level: complexityLevel }
       },
       geometryFacts,
-      workstationCatalog: workstations.map(item => ({ code: safeText(item.code, 60), name: safeText(item.name, 80), costType: safeText(item.costType, 20) }))
+      workstationCatalog: workstations.filter(item => item.costType === 'time').map(item => ({ code: safeText(item.code, 60), name: safeText(item.name, 80), costType: safeText(item.costType, 20) }))
     };
   }
 
@@ -63,7 +102,7 @@ class AIProcessDraftService {
   messages(payload) {
     return [{
       role: 'system',
-      content: `你是机加工工艺工程师。直接根据 geometryFacts、尺寸标注和曲面统计生成待人工确认的工艺初稿，不要把本地规则候选作为依据。不得编造图纸事实；不得输出材料价格、工费率、报价金额。只可使用 workstationCatalog 已有工站 code，否则 processCode 为空并标记 requiresConfiguration。sourceFactIds 和 featureIds 只能引用 geometryFacts 的 id。建议分钟数范围 1-480。推理要简洁，最终只输出 JSON：{"featureCandidates":[{"type":"孔/槽/型腔/平面/倒角等","description":"说明","sourceFactIds":["事实id"],"confidence":0.8}],"processSuggestions":[{"name":"工序","processCode":"已有工站code或空","processType":"cncMilling/drilling/turning/chamferReview/contourReview/surfaceReview/deburrReview","sequence":1,"minutes":10,"confidence":0.8,"basis":"依据","featureIds":["事实id"],"requiresConfiguration":false}],"requirementCandidates":[{"category":"材料/粗糙度/热处理/表面处理","value":"候选","confidence":0.5,"basis":"依据"}],"reviewItems":["待人工核对事项"]}`
+      content: `你是机加工工艺工程师。直接根据 geometryFacts、尺寸标注和曲面统计生成待人工确认的工艺初稿，不要把本地规则候选作为依据。按证据优先：只有能引用 sourceFactIds 的特征才可建议；无法由几何区分孔/外圆、通盲或螺纹时，应保守表述并放入 reviewItems。按相关性输出：featureCandidates 最多 12 项、processSuggestions 最多 8 项、requirementCandidates 最多 4 项、reviewItems 最多 6 项；description 和 basis 各不超过 60 字。不得编造图纸事实；不得输出材料价格、工费率、报价金额。只可使用 workstationCatalog 已有工站 code，否则 processCode 为空并标记 requiresConfiguration。sourceFactIds 和 featureIds 只能引用 geometryFacts 的 id。建议分钟数范围 1-480。推理要简洁，最终只输出 JSON：{"featureCandidates":[{"type":"孔/槽/型腔/平面/倒角等","description":"说明","sourceFactIds":["事实id"],"confidence":0.8}],"processSuggestions":[{"name":"工序","processCode":"已有工站code或空","processType":"cncMilling/drilling/turning/chamferReview/contourReview/surfaceReview/deburrReview","sequence":1,"minutes":10,"confidence":0.8,"basis":"依据","featureIds":["事实id"],"requiresConfiguration":false}],"requirementCandidates":[{"category":"材料/粗糙度/热处理/表面处理","value":"候选","confidence":0.5,"basis":"依据"}],"reviewItems":["待人工核对事项"]}`
     }, { role: 'user', content: JSON.stringify(payload) }];
   }
 
