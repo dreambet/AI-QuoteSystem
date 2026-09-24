@@ -7,7 +7,7 @@ const jsonFields = new Set([
 
 const quoteFields = new Set([
   'materialCode', 'partName', 'partDescription', 'material',
-  'grossWeight', 'netWeight', 'quantity', 'drawingPath', 'blankSpec', 'finishedSpec',
+  'grossWeight', 'netWeight', 'quantity', 'drawingPath', 'drawingName', 'drawingArchivedAt', 'blankSpec', 'finishedSpec',
   'strategyVersionId', 'priceSnapshot', 'processSnapshot', 'calculation', 'aiReview',
   'manualReview', 'drawingAnalysis', 'aiQuoteAnalysis', 'finalUnitPrice', 'status'
 ]);
@@ -45,7 +45,7 @@ class Quote {
     const stamp = new Date();
     const fields = [
       'id', 'materialCode', 'partName', 'partDescription', 'material',
-      'grossWeight', 'netWeight', 'quantity', 'drawingPath', 'blankSpec', 'finishedSpec',
+      'grossWeight', 'netWeight', 'quantity', 'drawingPath', 'drawingName', 'blankSpec', 'finishedSpec',
       'strategyVersionId', 'priceSnapshot', 'processSnapshot', 'status', 'createdAt', 'updatedAt'
     ];
     const normalized = {
@@ -97,13 +97,7 @@ class Quote {
     };
   }
 
-  static async findAll() {
-    const rows = await db.query(`${this.LIST_SELECT} FROM quotes ORDER BY createdAt DESC`);
-    return rows.map(row => this._projectListRow(row));
-  }
-
-  // 多字段追溯搜索：materialCode / partName / partDescription / 通用 q
-  static async search(filters = {}) {
+  static _listConditions(filters = {}) {
     const conditions = [];
     const params = [];
     const { materialCode, partName, partDescription, q, status } = filters;
@@ -116,9 +110,34 @@ class Quote {
       const like = `%${q}%`;
       params.push(like, like, like);
     }
-    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-    const rows = await db.query(`${this.LIST_SELECT} FROM quotes ${where} ORDER BY createdAt DESC`, params);
-    return rows.map(row => this._projectListRow(row));
+    return { where: conditions.length ? `WHERE ${conditions.join(' AND ')}` : '', params };
+  }
+
+  static async findPage(filters = {}) {
+    const page = Math.max(1, Math.min(100000, Number.parseInt(filters.page, 10) || 1));
+    const pageSize = Math.max(10, Math.min(100, Number.parseInt(filters.pageSize, 10) || 25));
+    const { where, params } = this._listConditions(filters);
+    const [countRows, rows, summaryRows] = await Promise.all([
+      db.query(`SELECT COUNT(*) AS total FROM quotes ${where}`, params),
+      db.query(`${this.LIST_SELECT} FROM quotes ${where} ORDER BY createdAt DESC LIMIT ? OFFSET ?`, [...params, pageSize, (page - 1) * pageSize]),
+      db.query(`SELECT COUNT(*) AS total, SUM(calculation IS NOT NULL AND calculation <> '') AS calculated, SUM(status IN ('ai_reviewed', 'ai_quoted', 'manually_reviewed', 'finalized')) AS reviewed, COUNT(DISTINCT NULLIF(materialCode, '')) AS materialCodeCount FROM quotes ${where}`, params)
+    ]);
+    const total = Number(countRows[0]?.total || 0);
+    const summary = summaryRows[0] || {};
+    return {
+      items: rows.map(row => this._projectListRow(row)),
+      pagination: { page, pageSize, total, totalPages: Math.max(1, Math.ceil(total / pageSize)) },
+      summary: { total, calculated: Number(summary.calculated || 0), reviewed: Number(summary.reviewed || 0), materialCodeCount: Number(summary.materialCodeCount || 0) }
+    };
+  }
+
+  static async findAll() {
+    return (await this.findPage({ page: 1, pageSize: 100 })).items;
+  }
+
+  // 多字段追溯搜索：materialCode / partName / partDescription / 通用 q
+  static async search(filters = {}) {
+    return (await this.findPage({ ...filters, page: 1, pageSize: 100 })).items;
   }
 
   static async findById(id) {

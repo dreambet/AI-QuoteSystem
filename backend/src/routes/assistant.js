@@ -39,12 +39,13 @@ function parseSseBlock(block) {
 
 router.post('/chat', async (req, res) => {
   const query = typeof req.body?.query === 'string' ? req.body.query.trim() : '';
-  const user = normaliseUserId(req.body?.userId);
+  // 会话身份由已登录管理员决定，不信任浏览器传来的 userId。
+  const user = normaliseUserId(`administrator_${req.user?.id}`);
   const conversationId = normaliseConversationId(req.body?.conversationId);
 
   if (!query) return res.status(400).json({ error: '请输入需要咨询的问题。' });
   if (query.length > 4000) return res.status(400).json({ error: '单次问题不能超过 4000 个字符。' });
-  if (!user) return res.status(400).json({ error: '会话身份无效，请新建会话后重试。' });
+  if (!user) return res.status(401).json({ error: '登录身份无效，请重新登录。' });
 
   const baseUrl = String(process.env.DIFY_API_BASE || '').replace(/\/+$/, '');
   const apiKey = process.env.DIFY_API_KEY;

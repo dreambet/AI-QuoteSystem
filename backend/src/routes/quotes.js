@@ -14,35 +14,18 @@ cadParserPool.warmup().catch(() => {});
 const db = require('../db');
 const path = require('path');
 const fs = require('fs');
+const DrawingStorage = require('../services/DrawingStorage');
 
-const uploadsDir = path.join(__dirname, '../uploads');
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, { recursive: true });
-}
-const modelsDir = path.join(uploadsDir, 'models');
-if (!fs.existsSync(modelsDir)) {
-  fs.mkdirSync(modelsDir, { recursive: true });
-}
+DrawingStorage.ensureDirectories();
+const uploadsDir = DrawingStorage.uploadsDir;
+const modelsDir = DrawingStorage.modelsDir;
 
 // 图纸上传 multer 配置（与 upload.js 保持一致的存储规则与格式限制）
-const DRAWING_EXTENSIONS = ['.dwg', '.dxf', '.step', '.stp'];
-const drawingFileFilter = (req, file, cb) => {
-  const ext = path.extname(file.originalname).toLowerCase();
-  if (!DRAWING_EXTENSIONS.includes(ext)) {
-    return cb(new Error('不支持的图纸格式，仅支持 DWG/DXF/STEP/STP'));
-  }
-  cb(null, true);
-};
-const drawingStorage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, uploadsDir),
-  filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
-    cb(null, uniqueSuffix + path.extname(file.originalname));
-  }
+const uploadDrawing = multer({
+  storage: multer.diskStorage(DrawingStorage.multerStorage()),
+  fileFilter: DrawingStorage.multerFilter,
+  limits: { fileSize: DrawingStorage.maxFileSize }
 });
-// 单文件 50MB 上限（与 upload.js 一致），防止无限制上传耗尽磁盘
-const MAX_FILE_SIZE = Number(process.env.MAX_FILE_SIZE) || 50 * 1024 * 1024;
-const uploadDrawing = multer({ storage: drawingStorage, fileFilter: drawingFileFilter, limits: { fileSize: MAX_FILE_SIZE } });
 
 // ---------- 计算辅助 ----------
 const num = (value, fallback = 0) => {
@@ -54,6 +37,8 @@ const AI_BLANK_SPEC_KEYS = ['材质', '形状', '料长', '料宽', '料厚', '�
 const AI_FINISHED_SPEC_KEYS = ['料长', '料宽', '料厚', '外径', '内径', '步距', '净重'];
 const AI_DIMENSION_KEYS = ['length', 'width', 'height', 'diameter'];
 const TECHNICAL_REQUIREMENT_PATTERN = /粗糙|(?:\bra|rz)\s*\d|公差|平面度|平行度|垂直度|同轴度|圆度|跳动|螺纹|攻牙|热处理|淬火|回火|渗碳|氮化|镀|阳极|喷砂|抛光|发黑|磷化|酸洗|钝化|去毛刺|倒角|镭雕/i;
+const REVIEW_FEATURE_PATTERN = /孔|槽|腔|螺纹|攻牙|倒角|圆角|薄壁|曲面|圆锥|齿|配合|台阶|精加工/i;
+const REVIEW_DIMENSION_PATTERN = /孔|直径|半径|深度|螺纹|槽|外径|内径|倒角|圆角|(?:Φ|φ|⌀)/i;
 const compactAiText = (value, limit = 80) => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, limit);
 const compactAiObject = (source, keys) => keys.reduce((out, key) => {
   const value = source && source[key];
@@ -91,6 +76,70 @@ const keyDimensionsForAi = annotations => (annotations || []).filter(item => ite
 const technicalRequirementsForAi = values => {
   const candidates = (values || []).flatMap(value => String(value || '').split(/[\r\n；;。]/)).map(item => compactAiText(item, 100)).filter(item => item && TECHNICAL_REQUIREMENT_PATTERN.test(item));
   return [...new Set(candidates)].slice(0, 6);
+};
+const classifyTechnicalRequirement = value => {
+  if (/热处理|淬火|回火|渗碳|氮化/i.test(value)) return '热处理';
+  if (/镀|阳极|喷砂|抛光|发黑|磷化|酸洗|钝化/i.test(value)) return '表面处理';
+  if (/粗糙|(?:\bra|rz)\s*\d/i.test(value)) return '粗糙度';
+  if (/螺纹|攻牙/i.test(value)) return '螺纹';
+  if (/去毛刺|倒角/i.test(value)) return '去毛刺/倒角';
+  return '尺寸与公差';
+};
+// 审核只关注会导致工序遗漏或质量风险的要求，避免整段图纸文字重复进入模型。
+const technicalRequirementsForReview = values => technicalRequirementsForAi(values)
+  .map(value => ({ category: classifyTechnicalRequirement(value), value }))
+  .slice(0, 5);
+const reviewFeatureSummary = features => Object.entries((features || []).reduce((out, feature) => {
+  const type = compactAiText(feature?.type || '', 32);
+  if (!type || !REVIEW_FEATURE_PATTERN.test(`${type} ${feature?.description || ''}`)) return out;
+  out[type] = (out[type] || 0) + 1;
+  return out;
+}, {})).sort((a, b) => b[1] - a[1]).slice(0, 10).reduce((out, [type, count]) => ({ ...out, [type]: count }), {});
+const representativeReviewFeatures = features => (features || []).map(feature => ({
+  type: compactAiText(feature?.type || '', 32),
+  description: compactAiText(feature?.description || '', 88)
+})).filter(item => item.type && REVIEW_FEATURE_PATTERN.test(`${item.type} ${item.description}`))
+  .filter((item, index, list) => list.findIndex(other => other.type === item.type && other.description === item.description) === index)
+  .slice(0, 5);
+const reviewDimensionsForAi = annotations => keyDimensionsForAi(annotations).filter(item => {
+  const magnitude = toleranceMagnitude(item.tolerance);
+  return REVIEW_DIMENSION_PATTERN.test(item.type) || (magnitude != null && magnitude <= 0.05);
+}).slice(0, 6);
+const reviewGlobalToleranceForAi = value => {
+  const tolerance = compactAiText(value, 32);
+  const magnitude = toleranceMagnitude(tolerance);
+  return magnitude != null && magnitude <= 0.05 ? tolerance : null;
+};
+const reviewProcessesForAi = selection => {
+  const grouped = new Map();
+  for (const item of (selection || []).filter(item => item?.name)) {
+    const name = compactAiText(item.name, 48);
+    const costType = compactAiText(item.costType, 20);
+    const key = `${name}|${costType}`;
+    const current = grouped.get(key) || { name, costType, enabled: true, count: 0, minutes: 0, hasMinutes: false };
+    current.count += 1;
+    if (item.costType === 'time' && item.minutes != null) {
+      current.minutes += num(item.minutes, 0);
+      current.hasMinutes = true;
+    }
+    grouped.set(key, current);
+  }
+  return [...grouped.values()].slice(0, 10).map(item => ({
+    name: item.name,
+    costType: item.costType,
+    enabled: item.enabled,
+    ...(item.count > 1 ? { count: item.count } : {}),
+    ...(item.hasMinutes ? { minutes: Math.round(item.minutes * 10) / 10 } : {})
+  }));
+};
+// 价格和正常历史均不需要模型解读；仅把需要复核的历史异常摘要交给 AI。
+const abnormalHistoryForAi = baseline => {
+  if (!baseline) return null;
+  const result = {};
+  if (baseline.deviation && baseline.deviation !== '正常') result.unitPriceDeviation = baseline.deviation;
+  if (baseline.processDiff) result.processDiff = compactAiText(baseline.processDiff, 120);
+  if (baseline.durationFlags?.length) result.durationAnomalies = baseline.durationFlags.slice(0, 5).map(item => ({ process: compactAiText(item.process, 48), multiple: item.multiple }));
+  return Object.keys(result).length ? result : null;
 };
 const STALE_DAYS = 30;
 const isStale = confirmedAt => !confirmedAt || (Date.now() - new Date(confirmedAt).getTime()) > STALE_DAYS * 86400000;
@@ -194,9 +243,32 @@ async function enrichSelection(selection) {
       source: sel.source || '人工确认',
       basis: sel.basis || null,
       featureIds: Array.isArray(sel.featureIds) ? sel.featureIds : [],
-      confidence: sel.confidence != null ? num(sel.confidence) : null
+      confidence: sel.confidence != null ? num(sel.confidence) : null,
+      // 采纳 AI 工艺初稿时，保留当时的工艺类型、依据与置信度；仅用于核价单追溯，不参与公式计算。
+      processSuggestionSnapshot: sel.processSuggestionSnapshot && typeof sel.processSuggestionSnapshot === 'object' ? {
+        id: compactAiText(sel.processSuggestionSnapshot.id, 60) || null,
+        source: compactAiText(sel.processSuggestionSnapshot.source || sel.source, 60) || null,
+        processType: compactAiText(sel.processSuggestionSnapshot.processType, 40) || null,
+        basis: compactAiText(sel.processSuggestionSnapshot.basis || sel.basis, 240) || null,
+        featureIds: Array.isArray(sel.processSuggestionSnapshot.featureIds) ? sel.processSuggestionSnapshot.featureIds.map(item => compactAiText(item, 80)).filter(Boolean).slice(0, 12) : [],
+        confidence: sel.processSuggestionSnapshot.confidence != null ? num(sel.processSuggestionSnapshot.confidence) : null
+      } : null
     };
   });
+}
+
+// 工序确认目录快照：核价单需要同时展示本次采用与未采用的工站，
+// 因此在计算时保存当时可选的全局工站，避免日后目录变更影响历史报价单。
+async function getProcessCatalogSnapshot() {
+  const processes = await db.query('SELECT code, name, costType, hourlyRate, unitRate, fixedAmount FROM processes WHERE active = 1 ORDER BY id');
+  return processes.map(item => ({
+    processCode: item.code,
+    name: item.name,
+    costType: item.costType,
+    hourlyRate: item.hourlyRate != null ? num(item.hourlyRate) : null,
+    unitRate: item.unitRate != null ? num(item.unitRate) : null,
+    amount: item.fixedAmount != null ? num(item.fixedAmount) : null
+  }));
 }
 
 router.post('/', async (req, res) => {
@@ -211,12 +283,7 @@ router.post('/', async (req, res) => {
 
 router.get('/', async (req, res) => {
   try {
-    const { materialCode, partName, partDescription, q, status } = req.query;
-    const hasFilter = materialCode || partName || partDescription || q || status;
-    const quotes = hasFilter
-      ? await Quote.search({ materialCode, partName, partDescription, q, status })
-      : await Quote.findAll();
-    res.json(quotes);
+    res.json(await Quote.findPage(req.query || {}));
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -236,7 +303,10 @@ router.get('/:id', async (req, res) => {
 
 router.put('/:id', async (req, res) => {
   try {
-    const quote = await Quote.update(req.params.id, req.body);
+    // 状态只能由计算、AI 审核和人工审核等专用动作推进，避免浏览器直接伪造“已完成”。
+    const { status: _status, ...editableFields } = req.body || {};
+    if (_status !== undefined) return res.status(400).json({ error: '报价状态由系统流程自动维护，不能直接修改。' });
+    const quote = await Quote.update(req.params.id, editableFields);
     res.json(quote);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -280,6 +350,7 @@ router.post('/:id/calculate', async (req, res) => {
 
     const strategy = await resolveStrategy(quote.strategyVersionId, { ...strategyOverrides, strategyId: strategyOverrides.strategyId || strategyId });
     const selection = await enrichSelection(processSelection);
+    const processCatalogSnapshot = await getProcessCatalogSnapshot();
     const fee = setupFee != null ? num(setupFee) : num(strategy.setupFeeDefault, 0);
 
     // 计价方式由形状驱动（直接价不适用于方块/球体，仅用于新增的自定义形状）：
@@ -315,7 +386,7 @@ router.post('/:id/calculate', async (req, res) => {
     // 用户第3步手填单价 -> 回写共享目录 material_prices（旧 active 转 historical，新价升为 active）。
     // 失败不阻断计算，仅告警。
     if (priceSource === 'manual') {
-      try { await upsertMaterialPrice(quote.material, price); }
+      try { await upsertMaterialPrice(quote.material, price, req.user?.username || '管理员'); }
       catch (err) { console.warn('回写 material_prices 失败:', err.message); }
     }
 
@@ -335,6 +406,7 @@ router.post('/:id/calculate', async (req, res) => {
     };
     const processSnapshot = {
       processSelection: selection,
+      processCatalogSnapshot,
       strategy: { id: strategy.id, overheadRate: strategy.overheadRate, profitRate: strategy.profitRate, taxRate: strategy.taxRate, sampleMultiplier: strategy.sampleMultiplier, materialLossRate: strategy.materialLossRate, toolLossRate: strategy.toolLossRate, setupFee: fee },
       computed: { processes: calculation.processes, additions: calculation.additions }
     };
@@ -498,16 +570,26 @@ router.post('/:id/ai-review/stream', async (req, res) => {
 router.post('/:id/manual-review', async (req, res) => {
   try {
     const { status, comments } = req.body;
+    const quote = await Quote.findById(req.params.id);
+    if (!quote) return res.status(404).json({ error: '报价任务不存在。' });
     const manualReview = {
       status,
       comments,
       reviewedAt: new Date().toISOString()
     };
+    const finalized = status === 'approved';
+    const archivedAt = finalized ? new Date() : null;
 
     const updatedQuote = await Quote.update(req.params.id, {
       manualReview,
-      status: status === 'approved' ? 'finalized' : 'manually_reviewed'
+      status: finalized ? 'finalized' : 'manually_reviewed',
+      ...(finalized ? { drawingPath: null, drawingArchivedAt: archivedAt } : {})
     });
+
+    if (finalized) {
+      const cleanup = await DrawingStorage.clearCompletedQuoteDrawing(quote);
+      console.info('已完成报价图纸已清理', { quoteId: quote.id, ...cleanup });
+    }
 
     res.json(updatedQuote);
   } catch (error) {
@@ -530,8 +612,12 @@ router.get('/:id/export', async (req, res) => {
       return res.status(409).json({ error: '该报价尚未完成计算，无法导出' });
     }
 
+    // 旧报价尚无工序目录快照时，以当前有效目录补齐“未采用工序”；新报价优先使用计算时快照。
+    const exportQuote = quote.processSnapshot?.processCatalogSnapshot?.length
+      ? quote
+      : { ...quote, exportProcessCatalog: await getProcessCatalogSnapshot() };
     outputPath = path.join(uploadsDir, `quote-${quote.id}.xlsx`);
-    await QuoteExcelGenerator.generate(quote, outputPath);
+    await QuoteExcelGenerator.generate(exportQuote, outputPath);
 
     // 文件名过滤 Windows 非法字符与控制符，避免 Content-Disposition 异常
     const safeName = String(quote.partName || quote.id).replace(/[\\/:*?"<>|\r\n]+/g, '_').trim() || quote.id;
@@ -561,9 +647,15 @@ router.post('/:id/analyze-drawing', uploadDrawing.single('drawing'), async (req,
     // 确定图纸路径：上传文件 > 请求体 drawingPath > quote 上已存的 drawingPath
     let drawingPath;
     if (req.file) {
+      try {
+        await DrawingStorage.validateFileSignature(req.file.path, req.file.filename);
+      } catch (error) {
+        await DrawingStorage.removeFileIfExists(req.file.path);
+        return res.status(400).json({ error: error.message });
+      }
       drawingPath = req.file.filename;
       // 同时更新 quote 上的 drawingPath
-      await Quote.update(req.params.id, { drawingPath });
+      await Quote.update(req.params.id, { drawingPath, drawingName: String(req.file.originalname || '').slice(0, 255) });
     } else if (req.body.drawingPath) {
       drawingPath = req.body.drawingPath;
     } else if (quote.drawingPath) {
@@ -578,15 +670,11 @@ router.post('/:id/analyze-drawing', uploadDrawing.single('drawing'), async (req,
     }
 
     // 路径穿越防御：drawingPath 可能来自客户端，必须落在 uploadsDir 内
-    const fullPath = path.resolve(path.join(uploadsDir, drawingPath));
-    if (!fullPath.startsWith(path.resolve(uploadsDir) + path.sep)) {
-      return res.status(400).json({ error: '非法的图纸路径' });
-    }
+    let fullPath;
+    try { fullPath = DrawingStorage.resolveDrawing(drawingPath); } catch (error) { return res.status(400).json({ error: error.message }); }
     if (!fs.existsSync(fullPath)) {
       return res.status(404).json({
-        error: '图纸文件不存在',
-        drawingPath,
-        fullPath
+        error: '图纸文件不存在或已按保留策略清理。'
       });
     }
 
@@ -811,7 +899,7 @@ function buildAiQuotePayload(quote) {
       finished: compactAiObject(quote.finishedSpec, AI_FINISHED_SPEC_KEYS)
     },
     envelopeMm: compactAiObject(da.dimensions, AI_DIMENSION_KEYS),
-    globalTolerance: compactAiText(da.globalTolerance, 32) || null,
+    globalTolerance: reviewGlobalToleranceForAi(da.globalTolerance),
     keyDimensions: keyDimensionsForAi(da.dimensionAnnotations),
     featureSummary: summarizeFeatureTypes(features),
     representativeFeatures: representativeFeatures(features),
@@ -832,22 +920,14 @@ function buildSemanticReviewPayload(quote, baseline) {
       finished: compactAiObject(quote.finishedSpec, AI_FINISHED_SPEC_KEYS)
     },
     globalTolerance: compactAiText(da.globalTolerance, 32) || null,
-    keyDimensions: keyDimensionsForAi(da.dimensionAnnotations),
-    technicalRequirements: technicalRequirementsForAi([quote.partDescription, da.notes]),
-    featureSummary: summarizeFeatureTypes(features),
-    processes: ((quote.processSnapshot && quote.processSnapshot.processSelection) || []).filter(p => p?.name).slice(0, 12).map(p => ({
-      name: compactAiText(p.name, 48),
-      costType: p.costType,
-      minutes: p.minutes != null ? Number(p.minutes) : null
-    })),
+    keyDimensions: reviewDimensionsForAi(da.dimensionAnnotations),
+    technicalRequirements: technicalRequirementsForReview([quote.partDescription, da.notes]),
+    featureSummary: reviewFeatureSummary(features),
+    representativeFeatures: representativeReviewFeatures(features),
+    processes: reviewProcessesForAi((quote.processSnapshot && quote.processSnapshot.processSelection) || []),
     quantity: Math.max(1, num(quote.quantity, 1)),
     setupFeeApplied: Number(quote.calculation && quote.calculation.setupFee) > 0,
-    history: baseline ? {
-      firstQuote: !!baseline.firstQuote,
-      unitPriceDeviation: baseline.deviation || null,
-      processDiff: compactAiText(baseline.processDiff, 120) || null,
-      durationAnomalies: (baseline.durationFlags || []).slice(0, 5).map(item => ({ process: compactAiText(item.process, 48), multiple: item.multiple }))
-    } : null
+    history: abnormalHistoryForAi(baseline)
   };
 }
 

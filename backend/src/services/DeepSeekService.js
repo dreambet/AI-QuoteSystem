@@ -9,6 +9,7 @@ class DeepSeekService {
     this.isConfigured = !!this.apiKey;
     this.quoteMaxTokens = Math.max(900, Number(process.env.AI_QUOTE_MAX_TOKENS) || 1600);
     this.reviewMaxTokens = Math.max(1000, Number(process.env.AI_REVIEW_MAX_TOKENS) || 1800);
+    this.timeout = Math.max(10000, Number(process.env.AI_REQUEST_TIMEOUT_MS) || 60000);
   }
 
   // 报价建议共享的消息构造（非流式/流式同一份 prompt，保证行为一致）
@@ -72,13 +73,14 @@ ${JSON.stringify(quoteData, null, 2)}`
           headers: {
             'Authorization': `Bearer ${this.apiKey}`,
             'Content-Type': 'application/json'
-          }
+          },
+          timeout: this.timeout
         }
       );
 
       const content = response.data.choices[0].message.content;
       try {
-        return this.parseJsonContent(content);
+        return { ...this.parseJsonContent(content), source: 'ai', degraded: false };
       } catch (e) {
         console.error('AI返回JSON解析失败:', e.message);
         return { rawText: content };
@@ -98,18 +100,18 @@ ${JSON.stringify(quoteData, null, 2)}`
         content: `你是机加工报价单的交付前质检员。报价由确定性公式计算（不会错），你检查的是人工确认环节的疏漏。只报告有具体依据的问题，不做泛化建议。
 
 检测维度（按优先级）：
-1. 工序完整性：technicalRequirements 中的表面处理/热处理/去毛刺等明确要求在 processes 中是否遗漏；材料牌号的常见配套工艺仅在有明确依据时提示。
-2. 特征-工序匹配：featureSummary 中的孔/槽特征数量与已选加工工序是否匹配（如大量孔位却无任何孔加工工序）。
+1. 工序完整性：technicalRequirements 是已分类的技术要求摘要，检查其表面处理/热处理/去毛刺等明确要求在 processes 中是否遗漏；材料牌号的常见配套工艺仅在有明确依据时提示。
+2. 特征-工序匹配：featureSummary 和 representativeFeatures 仅包含高风险制造特征，检查孔/槽/型腔等与已选加工工序是否匹配（如大量孔位却无任何孔加工工序）。
 3. 加工时长合理性：processes 的 minutes 与规格（料长/外径/毛重）和特征复杂度是否相称（如料长12mm车床90分钟）。
 4. 规格自洽：毛重<净重、毛重/净重>3、方料与圆料规格同填冲突、MOQ=1却收调机费等矛盾。
 5. 公差-工序匹配：globalTolerance 或 keyDimensions 中的紧公差（≤±0.02）是否有磨床等精加工工序支撑。
-6. 历史漂移解读：history 字段是本地计算的基线结论（首次报价/工序差异/时长倍数异常/单件价偏离等级），据此提示用户核实是否改错参数。history 中不含价格数字。
+6. 历史漂移解读：history 仅在检测到异常时才会出现，包含工序差异、时长倍数异常或单件价偏离等级；据此提示用户核实是否改错参数。history 中不含价格数字。
 
 输出要求：
 - 只输出确实存在的问题，宁缺毋滥；没有问题返回空 findings 并在 summary 说明"未发现明显疏漏"。
 - 每条 finding 的 location 必须是以下之一："工序确认"、"材料规格"、"产品规格"、"基本信息"。
 - message 一句话（≤50字），evidence 引用具体输入字段值作为依据。
-- 最多输出6条，按 severity（high/medium/low）降序；不要重复本地规则已能直接判断的金额或公式问题。
+- 最多输出6条，按 severity（high/medium/low）降序；不要重复本地规则已能直接判断的材料单价、金额、毛重净重等确定性问题。
 
 以JSON格式返回：
 {
@@ -176,11 +178,13 @@ ${JSON.stringify(quoteData, null, 2)}`
           headers: {
             'Authorization': `Bearer ${this.apiKey}`,
             'Content-Type': 'application/json'
-          }
+          },
+          timeout: this.timeout
         }
       );
       const choice = response.data.choices[0];
-      return this._parseSemanticContent(choice.message.content, choice.finish_reason);
+      const result = this._parseSemanticContent(choice.message.content, choice.finish_reason);
+      return result ? { ...result, source: 'ai', degraded: false } : null;
     } catch (error) {
       console.error('DeepSeek语义审核失败:', error.message);
       return null;
@@ -203,7 +207,8 @@ ${JSON.stringify(quoteData, null, 2)}`
             'Content-Type': 'application/json'
           },
           responseType: 'stream',
-          signal
+          signal,
+          timeout: this.timeout
         }
       );
     } catch (error) {
@@ -220,7 +225,8 @@ ${JSON.stringify(quoteData, null, 2)}`
       console.error('DeepSeek语义审核流式失败:', error.message);
       return null;
     }
-    return this._parseSemanticContent(result.content, result.finishReason);
+    const parsed = this._parseSemanticContent(result.content, result.finishReason);
+    return parsed ? { ...parsed, source: 'ai', degraded: false } : null;
   }
 
   // 流式版：onDelta(text) 逐段回调增量文本；signal 用于客户端取消时中止上游生成。
@@ -247,7 +253,8 @@ ${JSON.stringify(quoteData, null, 2)}`
             'Content-Type': 'application/json'
           },
           responseType: 'stream',
-          signal
+          signal,
+          timeout: this.timeout
         }
       );
     } catch (error) {
@@ -266,10 +273,10 @@ ${JSON.stringify(quoteData, null, 2)}`
     }
 
     try {
-      return this.parseJsonContent(result.content);
+      return { ...this.parseJsonContent(result.content), source: 'ai', degraded: false };
     } catch (e) {
       console.error('AI返回JSON解析失败(流式):', e.message);
-      return { rawText: result.content };
+      return { rawText: result.content, source: 'ai_unstructured', degraded: true };
     }
   }
 
@@ -342,8 +349,10 @@ ${JSON.stringify(quoteData, null, 2)}`
         machiningCost: 'Σ 工费率/60 × 加工时长',
         totalEstimation: '基于现有计算引擎（K/R/S/T/U/V/W）'
       },
-      warningPoints: ['建议进行人工审核', '请确认材料单价为最新市场价'],
-      suggestions: ['建议上传更清晰的图纸', '在工序确认面板核对加工时长']
+      warningPoints: ['AI 暂不可用，建议人工审核', '请确认材料单价为最新市场价'],
+      suggestions: ['使用系统本地计算引擎', '在工序确认面板核对加工时长'],
+      source: 'local_rule',
+      degraded: true
     };
   }
 }

@@ -5,6 +5,10 @@ class AIReviewer {
     const comments = [];
     const suggestions = [];
     let status = 'pass';
+    const warning = message => {
+      comments.push(message);
+      status = 'warning';
+    };
 
     if (!calculation) {
       return { status: 'fail', comments: ['请先计算报价'], suggestions: [] };
@@ -16,12 +20,10 @@ class AIReviewer {
     const T = Number(calculation.subtotal || 0) || total; // 小计
 
     if (total > 0 && total < 100) {
-      comments.push('报价偏低，建议检查毛重、单价与加工时长');
-      status = 'warning';
+      warning('报价偏低，建议检查毛重、单价与加工时长');
     }
     if (total > 100000) {
-      comments.push('报价较高，建议双人复核');
-      status = 'warning';
+      warning('报价较高，建议双人复核');
     }
 
     // 材料成本占比（相对小计 T）
@@ -40,20 +42,60 @@ class AIReviewer {
     // 单价确认/行情检查（核心：市场价波动提醒）
     if (priceSnapshot) {
       if (priceSnapshot.source === 'missing' || priceSnapshot.unitPrice == null || priceSnapshot.unitPrice === 0) {
-        comments.push('材料单价缺失，请先确认单价后再生成报价');
-        status = 'warning';
+        warning('材料单价缺失，请先确认单价后再生成报价');
       } else if (priceSnapshot.stale) {
-        comments.push('材料单价已过期或未确认，市场价格波动，请确认最新单价');
-        status = 'warning';
+        warning('材料单价已过期或未确认，市场价格波动，请确认最新单价');
       }
     } else {
-      comments.push('未记录单价快照，建议重新计算以留存价格确认信息');
-      status = 'warning';
+      warning('未记录单价快照，建议重新计算以留存价格确认信息');
     }
 
     // 贵重/特殊材料提醒
     if (['不锈钢', '铜材', 'S31603', 'S30408'].includes(material)) {
       suggestions.push('贵重/特殊材料，建议确认材料价格最新行情');
+    }
+
+    // 以下为不依赖模型即可确定的“人工确认完整性”检查；命中后由本地直接提示，
+    // 避免交给 AI 重复推理，既更快也更可追溯。
+    const blankSpec = quote.blankSpec || {};
+    const finishedSpec = quote.finishedSpec || {};
+    const parseNumber = value => {
+      const parsed = parseFloat(value);
+      return Number.isFinite(parsed) ? parsed : 0;
+    };
+    const grossWeight = parseNumber(quote.grossWeight ?? blankSpec.grossWeight ?? blankSpec['毛重']);
+    const netWeight = parseNumber(quote.netWeight ?? finishedSpec.netWeight ?? finishedSpec['净重']);
+    if (grossWeight > 0 && netWeight > 0 && grossWeight < netWeight) {
+      warning('毛重小于净重，请在产品规格中核对重量数据');
+    } else if (grossWeight > 0 && netWeight > 0 && grossWeight / netWeight > 3) {
+      warning('毛重超过净重 3 倍，请核对毛坯余量和重量单位');
+    }
+
+    const processes = (quote.processSnapshot && quote.processSnapshot.processSelection) || [];
+    const processNames = processes.map(item => String(item.name || '')).join(' ');
+    const missingMinutes = processes.some(item => item.costType === 'time' && !(Number(item.minutes) > 0));
+    if (missingMinutes) warning('存在按时长计费但未填写有效分钟数的工序，请在工序确认中补全');
+
+    const analysis = quote.drawingAnalysis || {};
+    const technicalText = [quote.partDescription, analysis.notes].filter(Boolean).join(' ');
+    const requiredProcessChecks = [
+      { requirement: /热处理|淬火|回火|渗碳|氮化/i, process: /热处理|淬火|回火|渗碳|氮化/i, message: '图纸技术要求包含热处理，但已确认工序未见热处理工序' },
+      { requirement: /镀|阳极|喷砂|抛光|发黑|磷化|酸洗|钝化/i, process: /镀|阳极|喷砂|抛光|发黑|磷化|酸洗|钝化|表面处理/i, message: '图纸技术要求包含表面处理，但已确认工序未见对应处理工序' },
+      { requirement: /去毛刺/i, process: /去毛刺|钳工|后处理/i, message: '图纸技术要求包含去毛刺，但已确认工序未见去毛刺或后处理工序' }
+    ];
+    for (const item of requiredProcessChecks) {
+      if (item.requirement.test(technicalText) && !item.process.test(processNames)) warning(item.message);
+    }
+
+    const toleranceTexts = [analysis.globalTolerance, ...((analysis.dimensionAnnotations || []).map(item => item && item.tolerance))]
+      .filter(Boolean)
+      .map(value => String(value));
+    const hasTightTolerance = toleranceTexts.some(value => {
+      const match = value.match(/(?:±|\+\/-|\+-)\s*(\d+(?:\.\d+)?)/);
+      return match && Number(match[1]) <= 0.02;
+    });
+    if (hasTightTolerance && !/磨|研磨|珩磨|精加工|精铣|精车/i.test(processNames)) {
+      warning('检测到 ±0.02 mm 及更严公差，但未见明确精加工工序，请确认工艺保障方式');
     }
 
     if (comments.length === 0 && status === 'pass') {

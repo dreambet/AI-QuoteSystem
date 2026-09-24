@@ -10,7 +10,8 @@ const router = express.Router();
 const DEFAULT_OPERATOR = 'system';
 const STALE_DAYS = 30;
 
-const operator = req => (req.body && req.body.operatorName) || (req.query && req.query.operatorName) || DEFAULT_OPERATOR;
+// 审计操作人必须来自后端已验证的登录身份，禁止由浏览器请求伪造。
+const operator = req => (req.user && req.user.username) || DEFAULT_OPERATOR;
 
 // ---------- 材料（含当前 active 价格） ----------
 router.get('/materials', async (req, res) => {

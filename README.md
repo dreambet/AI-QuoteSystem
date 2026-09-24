@@ -9,11 +9,11 @@
 - **智能报价引擎**: 基于AI分析的成本计算
 - **3D模型可视化**: 支持CAD文件查看
 - **AI审核建议**: 自动检测报价合理性
-- **PDF报价单导出**: 一键生成规范报价单
+- **核价单导出**: 人工审核通过后导出核价单 Excel
 
 ### 🔧 技术特性
-- 支持DWG, DXF, STEP, STP, PNG, JPG, JPEG, PDF等格式
-- 基于DeepSeek Vision模型的智能分析
+- 支持 DWG、DXF、STEP、STP 图纸上传与本地 CAD 解析
+- 本地 CAD 事实经脱敏后由 AI 生成工艺初稿；AI 不可用时回退本地规则
 - 完整的工序分解和工时计算
 - 灵活的参数调整和优化建议
 - 响应式的Web界面
@@ -43,7 +43,7 @@
 │ │ 📄 PDF生成服务 - 报价单导出                             │ │
 │ └─────────────────────────────────────────────────────────────┘ │
 ├─────────────────────────────────────────────────────────────────┤
-│                      🗄️ SQLite数据库                           │
+│                      🗄️ MySQL 数据库                           │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -70,7 +70,7 @@ npm install
 ```bash
 cd backend
 cp .env.example .env
-# 编辑 .env 文件，填入你的 DeepSeek API Key
+# 编辑 .env 文件，填入 AI、数据库和管理员登录配置
 ```
 
 配置内容:
@@ -88,9 +88,13 @@ AI_PROCESS_DRAFT_MAX_TOKENS=1800
 # 第四步报价建议与 AI 审核（输入白名单已压缩，以下为默认输出上限）
 AI_QUOTE_MAX_TOKENS=1600
 AI_REVIEW_MAX_TOKENS=1800
+AI_REQUEST_TIMEOUT_MS=60000
 UPLOAD_DIR=./uploads
 PORT=3001
 NODE_ENV=development
+AUTH_TOKEN_SECRET=replace_with_a_random_32_plus_character_secret
+ADMIN_INITIAL_USERNAME=admin
+ADMIN_INITIAL_PASSWORD=replace_with_a_12_plus_character_initial_password
 ```
 
 ### DWG 解析配置
@@ -124,7 +128,7 @@ npm start
 ### 方式一: AI智能报价 (推荐)
 
 1. 点击导航栏 "🤖 AI智能报价"
-2. 上传图纸文件（支持DWG/DXF/STEP/PNG/JPG等）
+2. 上传图纸文件（支持 DWG/DXF/STEP/STP）
 3. 填写基本信息（可选，AI会尝试提取）
 4. 点击"下一步"，等待AI分析图纸
 5. 查看AI提取的参数，确认或修改
@@ -204,9 +208,10 @@ npm start
 
 ## 🔐 安全说明
 
-- API Key 存储在后端环境变量中，不会暴露给前端
-- 上传文件存储在服务器本地，不会上传到外部服务
-- 建议在生产环境中添加用户认证和文件病毒扫描
+- 管理员需登录后才能访问报价、图纸、材料、工站和成本策略接口；账户密码以加盐哈希存储。
+- API Key 与登录密钥仅保存在后端环境变量中，不会暴露给前端。
+- 图纸使用随机文件标识存储，接口不返回服务器物理路径；上传内容会校验 CAD 文件头。
+- 正式上线请按 [上线交付清单](docs/上线交付清单.md) 完成数据库备份、HTTPS、权限与恢复演练。
 
 ## 🔄 开发说明
 

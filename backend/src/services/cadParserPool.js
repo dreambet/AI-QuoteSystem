@@ -7,6 +7,8 @@ const path = require('path');
 const fs = require('fs');
 
 const CACHE_LIMIT = 6; // 每个解析结果含网格可达数 MB，限制缓存条数
+const QUEUE_LIMIT = Math.max(1, Number(process.env.CAD_PARSE_QUEUE_LIMIT) || 8);
+const JOB_TIMEOUT_MS = Math.max(10000, Number(process.env.CAD_PARSE_TIMEOUT_MS) || 120000);
 
 class CadParserPool {
   constructor() {
@@ -37,10 +39,25 @@ class CadParserPool {
   }
 
   _run(kind, filePath) {
+    if (this.jobs.size >= QUEUE_LIMIT) {
+      return Promise.reject(new Error('CAD 解析任务繁忙，请稍后重试。'));
+    }
     const worker = this._ensureWorker();
     const jobId = ++this.seq;
     return new Promise((resolve, reject) => {
-      this.jobs.set(jobId, { resolve, reject });
+      const timer = setTimeout(() => {
+        const job = this.jobs.get(jobId);
+        if (!job) return;
+        this.jobs.delete(jobId);
+        job.reject(new Error('CAD 解析超时，请确认图纸复杂度或稍后重试。'));
+        // WASM 解析无法可靠中断，终止 worker，后续请求自动建立新 worker。
+        worker.terminate().catch(() => {});
+        this.worker = null;
+      }, JOB_TIMEOUT_MS);
+      this.jobs.set(jobId, {
+        resolve: value => { clearTimeout(timer); resolve(value); },
+        reject: error => { clearTimeout(timer); reject(error); }
+      });
       worker.postMessage({ jobId, kind, filePath });
     });
   }

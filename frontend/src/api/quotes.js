@@ -9,7 +9,7 @@ const CATALOG_BASE = '/api/catalog';
 const ssePost = async (url, body, handlers = {}, signal) => {
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...(sessionStorage.getItem('machining_quote_auth_token') ? { Authorization: `Bearer ${sessionStorage.getItem('machining_quote_auth_token')}` } : {}) },
     body: JSON.stringify(body || {}),
     signal
   });

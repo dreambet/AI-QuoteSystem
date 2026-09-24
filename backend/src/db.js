@@ -1,5 +1,6 @@
 require('dotenv').config();
 const mysql = require('mysql2/promise');
+const AuthService = require('./services/AuthService');
 
 const databaseConfig = {
   host: process.env.MYSQL_HOST || '127.0.0.1',
@@ -71,6 +72,32 @@ async function ensureColumn(connection, table, column, definition) {
   if (!rows.length) await connection.query(`ALTER TABLE \`${table}\` ADD COLUMN \`${column}\` ${definition}`);
 }
 
+async function ensureIndex(connection, table, index, definition) {
+  const [rows] = await connection.query(
+    `SELECT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ?`,
+    [table, index]
+  );
+  if (!rows.length) await connection.query(`ALTER TABLE \`${table}\` ADD ${definition}`);
+}
+
+async function ensureInitialAdministrator(connection) {
+  const [admins] = await connection.query("SELECT id FROM users WHERE role = 'admin' AND active = 1 LIMIT 1");
+  if (admins.length) return;
+  const username = AuthService.normalizeUsername(process.env.ADMIN_INITIAL_USERNAME);
+  const password = String(process.env.ADMIN_INITIAL_PASSWORD || '');
+  if (!username || AuthService.validatePassword(password)) {
+    console.warn('尚未创建管理员：请配置 ADMIN_INITIAL_USERNAME 和非空的 ADMIN_INITIAL_PASSWORD 后重启服务。');
+    return;
+  }
+  const now = new Date();
+  const passwordHash = await AuthService.hashPassword(password);
+  await connection.query(
+    'INSERT INTO users (username, passwordHash, role, active, tokenVersion, createdAt, updatedAt) VALUES (?, ?, ?, 1, 0, ?, ?)',
+    [username, passwordHash, 'admin', now, now]
+  );
+  console.info(`已创建初始管理员账户：${username}`);
+}
+
 async function ensureSchema() {
   const connection = await getConnection();
   try {
@@ -86,6 +113,8 @@ async function ensureSchema() {
         netWeight DECIMAL(16,6) NULL,
         quantity INT NOT NULL,
         drawingPath TEXT NULL,
+        drawingName VARCHAR(255) NULL,
+        drawingArchivedAt DATETIME NULL,
         blankSpec LONGTEXT NULL,
         finishedSpec LONGTEXT NULL,
         strategyVersionId BIGINT NULL,
@@ -104,9 +133,10 @@ async function ensureSchema() {
         INDEX idx_quotes_created_at (createdAt)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
+    await ensureIndex(connection, 'quotes', 'idx_quotes_status_created_at', 'INDEX idx_quotes_status_created_at (status, createdAt)');
 
     const quoteColumns = {
-      materialCode: 'VARCHAR(128) NULL', partDescription: 'TEXT NULL',
+      materialCode: 'VARCHAR(128) NULL', partDescription: 'TEXT NULL', drawingName: 'VARCHAR(255) NULL', drawingArchivedAt: 'DATETIME NULL',
       grossWeight: 'DECIMAL(16,6) NULL', netWeight: 'DECIMAL(16,6) NULL',
       blankSpec: 'LONGTEXT NULL', finishedSpec: 'LONGTEXT NULL', strategyVersionId: 'BIGINT NULL',
       priceSnapshot: 'LONGTEXT NULL', processSnapshot: 'LONGTEXT NULL', finalUnitPrice: 'DECIMAL(16,4) NULL'
@@ -191,6 +221,37 @@ async function ensureSchema() {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
     await connection.query('INSERT IGNORE INTO shapes (name, createdAt, updatedAt) VALUES (?, NOW(), NOW()), (?, NOW(), NOW())', ['方块', '球体']);
+
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+        username VARCHAR(64) NOT NULL UNIQUE,
+        passwordHash VARCHAR(255) NOT NULL,
+        role VARCHAR(32) NOT NULL DEFAULT 'admin',
+        active TINYINT(1) NOT NULL DEFAULT 1,
+        tokenVersion INT NOT NULL DEFAULT 0,
+        lastLoginAt DATETIME NULL,
+        createdAt DATETIME NOT NULL,
+        updatedAt DATETIME NOT NULL,
+        INDEX idx_users_role_active (role, active)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS audit_logs (
+        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+        actorUserId BIGINT NULL,
+        actorUsername VARCHAR(64) NULL,
+        action VARCHAR(255) NOT NULL,
+        requestId VARCHAR(64) NULL,
+        ipAddress VARCHAR(64) NULL,
+        statusCode SMALLINT NOT NULL,
+        durationMs INT NULL,
+        createdAt DATETIME NOT NULL,
+        INDEX idx_audit_logs_actor_created (actorUserId, createdAt),
+        INDEX idx_audit_logs_created (createdAt)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+    await ensureInitialAdministrator(connection);
   } finally {
     connection.release();
   }

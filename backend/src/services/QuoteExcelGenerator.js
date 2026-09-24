@@ -4,17 +4,7 @@ const path = require('path');
 
 const CURRENCY_FORMAT = '¥#,##0.00;[Red]-¥#,##0.00';
 const NUMBER_FORMAT = '#,##0.0000';
-const CUSTOM_STATION_SLOTS = 6;
-
-const STANDARD_STATIONS = [
-  ['锻造坯料', /锻造/], ['金属粉末成型', /金属粉末|粉末成型/], ['激光焊接', /激光焊/],
-  ['折弯', /折弯/], ['激光切割', /激光切割/], ['车/铣加工', /车|铣/],
-  ['走心机加工', /走心/], ['CNC加工', /CNC|加工中心/i], ['磨床加工', /磨/],
-  ['滚齿加工', /滚齿/], ['线割加工', /线割|线切割/], ['电泳', /电泳/],
-  ['镭雕', /镭雕/], ['喷砂', /喷砂/], ['热处理', /热处理/],
-  ['电镀/化学镀镍', /电镀|化学镀镍|镀镍/], ['氧化', /氧化|阳极/],
-  ['全检', /全检/], ['包材', /包材|包装/]
-];
+const PERCENT_FORMAT = '0.00%';
 
 const toNumber = value => {
   if (value === undefined || value === null || value === '') return null;
@@ -30,7 +20,10 @@ const formatDate = value => {
 class QuoteExcelGenerator {
   static async generate(quote, outputPath) {
     const workbook = new ExcelJS.Workbook();
-    const sheet = this.createTemplate(workbook);
+    // 已采用工序优先按第 3 步确认顺序呈现；随后列出当时可选但未采用的工站。
+    // 计算明细只用来补齐成本与公式，不再以固定工站模板覆盖或截断确认工序。
+    const { rows: displayRows } = this.buildStationRows(this.collectStations(quote));
+    const sheet = this.createTemplate(workbook, displayRows.length);
     const blankSpec = quote.blankSpec || {};
     const finishedSpec = quote.finishedSpec || {};
     const calculation = quote.calculation || {};
@@ -70,7 +63,6 @@ class QuoteExcelGenerator {
     setMoney('F8', residualPrice, '/');
     setMoney('H8', residualAmount, '/');
 
-    const { rows: displayRows, omitted } = this.buildStationRows(this.collectStations(quote));
     displayRows.forEach((entry, index) => this.fillStationRow(sheet, 11 + index, entry));
 
     const totalRow = 11 + displayRows.length;
@@ -90,7 +82,7 @@ class QuoteExcelGenerator {
 
     const total = toNumber(calculation.total);
     const noteRow = summaryRow + 1;
-    setText(`C${noteRow}`, `报价总额：${total === null ? '/' : `¥${total.toFixed(2)}`}${residualAmount === null ? '' : '（余料金额仅作记录，不参与报价）'}${omitted > 0 ? `；另有 ${omitted} 项自定义工站超出展示槽位未逐一列示，其成本已计入报价总额` : ''}`);
+    setText(`C${noteRow}`, `报价总额：${total === null ? '/' : `¥${total.toFixed(2)}`}${residualAmount === null ? '' : '（余料金额仅作记录，不参与报价）'}`);
     const quoteRow = noteRow + 1;
     setText(`C${quoteRow}`, `报价：系统导出 / ${formatDate(new Date())}`);
     const approvalRow = quoteRow + 1;
@@ -132,29 +124,26 @@ class QuoteExcelGenerator {
       if (key) detailMap.set(key, item);
     });
     const selected = quote.processSnapshot?.processSelection || [];
-    const source = selected.length ? selected : [...(calculation.processes || []), ...(calculation.additions || [])];
-    const seen = new Set();
+    const catalogSnapshot = quote.processSnapshot?.processCatalogSnapshot || quote.exportProcessCatalog || [];
+    const selectedKeys = new Set(selected.map(item => item.processCode || item.name).filter(Boolean));
+    // 新报价：确认工序在前、未采用目录工站在后；旧报价没有目录快照时退回计算明细。
+    const source = selected.length
+      ? [...selected.map(item => ({ ...item, adopted: true })), ...catalogSnapshot.filter(item => !selectedKeys.has(item.processCode || item.name)).map(item => ({ ...item, adopted: false }))]
+      : [...(calculation.processes || []), ...(calculation.additions || [])].map(item => ({ ...item, adopted: true }));
     return source.reduce((stations, item) => {
       const key = item.processCode || item.name;
-      if (!key || seen.has(key) || item.costType === 'percentage') return stations;
-      seen.add(key);
+      if (!key) return stations;
       const detail = detailMap.get(key) || {};
-      stations.push({ ...item, ...detail, processCode: item.processCode || detail.processCode, name: item.name || detail.name });
+      // 未采用工站不合并计算明细，避免历史上同名工序的成本错误落到未采用行。
+      const merged = item.adopted === false ? item : { ...item, ...detail };
+      stations.push({ ...merged, processCode: item.processCode || detail.processCode, name: item.name || detail.name });
       return stations;
     }, []);
   }
 
   static buildStationRows(stations) {
-    const remaining = [...stations];
-    const standardRows = STANDARD_STATIONS.map(([name, pattern]) => {
-      const index = remaining.findIndex(item => pattern.test(`${item.processCode || ''} ${item.name || ''}`));
-      if (index < 0) return { name };
-      return remaining.splice(index, 1)[0];
-    });
-    const customRows = remaining.slice(0, CUSTOM_STATION_SLOTS);
-    const omitted = remaining.length - customRows.length;
-    while (customRows.length < CUSTOM_STATION_SLOTS) customRows.push(null);
-    return { rows: standardRows.concat(customRows), omitted };
+    // 至少保留一行，用“/”明确表示当前没有已确认工序。
+    return { rows: stations.length ? stations : [null] };
   }
 
   static fillStationRow(sheet, row, station) {
@@ -165,33 +154,29 @@ class QuoteExcelGenerator {
       if (numeric !== null) sheet.getCell(address).numFmt = format;
     };
     if (!station || !station.costType) {
-      if (!station && row >= 11 + STANDARD_STATIONS.length) {
-        sheet.getRow(row).hidden = true;
-        return;
-      }
-      setText(`C${row}`, '未使用');
+      setText(`A${row}`, '/');
+      setText(`C${row}`, '/');
       setText(`D${row}`, '/');
       setText(`E${row}`, '/');
       setText(`F${row}`, '/');
-      setText(`G${row}`, '未同步');
+      setText(`G${row}`, '/');
       return;
     }
     setText(`A${row}`, station.name || '其他工站');
-    const labels = { time: '按时长', weight: '按重量', manual: '固定金额' };
+    const labels = { time: '按时长', weight: '按重量', manual: '固定金额', percentage: '按比例' };
     setText(`C${row}`, labels[station.costType] || station.costType);
-    const rate = station.costType === 'time' ? station.hourlyRate : station.costType === 'weight' ? station.unitRate : station.amount;
-    setNumeric(`D${row}`, rate, CURRENCY_FORMAT);
-    setNumeric(`E${row}`, station.costType === 'time' ? station.minutes : null, NUMBER_FORMAT);
-    setNumeric(`F${row}`, station.cost, CURRENCY_FORMAT);
-    setText(`G${row}`, station.formula || this.describeStation(station));
+    const rate = station.costType === 'time' ? station.hourlyRate : station.costType === 'weight' ? station.unitRate : station.costType === 'percentage' ? station.rate : station.amount;
+    setNumeric(`D${row}`, rate, station.costType === 'percentage' ? PERCENT_FORMAT : CURRENCY_FORMAT);
+    setNumeric(`E${row}`, station.adopted === false ? null : station.costType === 'time' ? station.minutes : null, NUMBER_FORMAT);
+    setNumeric(`F${row}`, station.adopted === false ? null : station.cost, CURRENCY_FORMAT);
+    setText(`G${row}`, station.adopted === false ? '/' : this.buildCalculationDescription(station));
   }
 
-  static createTemplate(workbook) {
+  static createTemplate(workbook, stationRows = 1) {
     const sheet = workbook.addWorksheet('产品核价单', {
       pageSetup: { orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0, paperSize: 9, horizontalCentered: true },
       views: [{ showGridLines: false }]
     });
-    const stationRows = STANDARD_STATIONS.length + CUSTOM_STATION_SLOTS;
     const totalRow = 11 + stationRows;
     const summaryRow = totalRow + 1;
     const noteRow = summaryRow + 1;
@@ -218,14 +203,10 @@ class QuoteExcelGenerator {
     sheet.getRow(10).values = ['工站/工艺', null, '计费类型', '费率或单价', '加工时间(分钟)', '工艺成本', '计算说明', null];
     sheet.mergeCells('A10:B10'); sheet.mergeCells('G10:H10');
 
-    const stationNames = STANDARD_STATIONS.map(([name]) => name).concat(
-      Array.from({ length: CUSTOM_STATION_SLOTS }, (_, index) => `其他工站 ${index + 1}`)
-    );
-    stationNames.forEach((name, index) => {
+    Array.from({ length: stationRows }, (_, index) => index).forEach(index => {
       const row = 11 + index;
       sheet.mergeCells(`A${row}:B${row}`);
       sheet.mergeCells(`G${row}:H${row}`);
-      sheet.getCell(`A${row}`).value = name;
     });
 
     sheet.mergeCells(`A${totalRow}:E${totalRow}`);
@@ -293,8 +274,14 @@ class QuoteExcelGenerator {
   static describeStation(station) {
     if (station.costType === 'time') return '工费率 × 加工时间';
     if (station.costType === 'weight') return '单位费率 × 净重';
+    if (station.costType === 'percentage') return '机加工成本 × 损耗率';
     if (station.costType === 'manual') return '人工填写金额';
     return '/';
+  }
+
+  static buildCalculationDescription(station) {
+    // AI 工艺初稿快照保留在报价数据中供追溯，但核价单仅呈现实际计价公式。
+    return station.formula || this.describeStation(station);
   }
 }
 

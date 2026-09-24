@@ -10,6 +10,11 @@ const FIELD_OPTIONS = [
   { value: 'partDescription', label: '物料描述' },
   { value: 'q', label: '全部' }
 ];
+const STATUS_OPTIONS = [
+  { value: '', label: '全部状态' }, { value: 'draft', label: '草稿' }, { value: 'calculated', label: '已计算' },
+  { value: 'ai_reviewed', label: 'AI 已审核' }, { value: 'ai_quoted', label: 'AI 已报价' },
+  { value: 'manually_reviewed', label: '人工已审核' }, { value: 'finalized', label: '已完成' }, { value: 'rejected', label: '已驳回' }
+];
 const fieldLabel = f => (FIELD_OPTIONS.find(o => o.value === f) || {}).label || f;
 
 function QuoteList() {
@@ -17,32 +22,40 @@ function QuoteList() {
   const [loading, setLoading] = useState(true);
   const [searchField, setSearchField] = useState('materialCode');
   const [searchValue, setSearchValue] = useState('');
+  const [status, setStatus] = useState('');
+  const [pagination, setPagination] = useState({ page: 1, pageSize: 25, total: 0, totalPages: 1 });
+  const [summary, setSummary] = useState({ total: 0, calculated: 0, reviewed: 0, materialCodeCount: 0 });
   const [trace, setTrace] = useState({ open: false, field: 'materialCode', value: '', results: [], loading: false });
 
-  const loadQuotes = (params) => {
+  const loadQuotes = (params = {}) => {
     setLoading(true);
-    quoteApi.getAll(params).then(r => setQuotes(r.data)).catch(() => setQuotes([])).finally(() => setLoading(false));
+    quoteApi.getAll({ pageSize: pagination.pageSize, ...params }).then(r => {
+      setQuotes(r.data.items || []);
+      setPagination(r.data.pagination || { page: 1, pageSize: 25, total: 0, totalPages: 1 });
+      setSummary(r.data.summary || { total: 0, calculated: 0, reviewed: 0, materialCodeCount: 0 });
+    }).catch(() => { setQuotes([]); setPagination(p => ({ ...p, total: 0, totalPages: 1 })); }).finally(() => setLoading(false));
   };
   useEffect(() => { loadQuotes({}); }, []);
 
+  const currentFilters = (page = 1) => ({ ...(searchValue.trim() ? { [searchField]: searchValue.trim() } : {}), ...(status ? { status } : {}), page });
   const handleSearch = () => {
     const v = searchValue.trim();
-    loadQuotes(v ? { [searchField]: v } : {});
+    loadQuotes({ ...(v ? { [searchField]: v } : {}), ...(status ? { status } : {}), page: 1 });
   };
-  const handleReset = () => { setSearchValue(''); loadQuotes({}); };
+  const handleReset = () => { setSearchValue(''); setStatus(''); loadQuotes({ page: 1 }); };
 
   const openTrace = async (field, value) => {
     if (!value) return;
     setTrace({ open: true, field, value, results: [], loading: true });
     try {
       const r = await quoteApi.getAll({ [field]: value });
-      setTrace(t => ({ ...t, results: r.data, loading: false }));
+      setTrace(t => ({ ...t, results: r.data.items || [], loading: false }));
     } catch { setTrace(t => ({ ...t, results: [], loading: false })); }
   };
 
-  const calculated = quotes.filter(q => q.calculation).length;
-  const reviewed = quotes.filter(q => ['ai_reviewed', 'ai_quoted', 'finalized'].includes(q.status)).length;
-  const codeCount = new Set(quotes.map(q => q.materialCode).filter(Boolean)).size;
+  const calculated = summary.calculated;
+  const reviewed = summary.reviewed;
+  const codeCount = summary.materialCodeCount;
 
   const codeButton = (code) => code
     ? <button type="button" className="table-view-link trace-code-btn" onClick={() => openTrace('materialCode', code)} title="点击追溯同物料编码历史报价">{code}</button>
@@ -54,7 +67,7 @@ function QuoteList() {
       <div className="quote-center-actions"><Link className="secondary-action link-action" to="/strategies">成本策略</Link><Link className="primary-action link-action" to="/quotes/ai-new">进入 AI 分析工作台</Link></div>
     </section>
     <section className="quote-center-stats">
-      <div><span>全部任务</span><strong>{quotes.length}</strong><small>报价记录总数</small></div>
+      <div><span>全部任务</span><strong>{summary.total}</strong><small>报价记录总数</small></div>
       <div><span>已完成计算</span><strong>{calculated}</strong><small>已生成参考价格</small></div>
       <div><span>涉及物料编码</span><strong>{codeCount}</strong><small>不同物料编码数</small></div>
       <div><span>已完成审核</span><strong>{reviewed}</strong><small>AI 或人工复核</small></div>
@@ -65,10 +78,11 @@ function QuoteList() {
         <span className="trace-label">追溯检索</span>
         <select value={searchField} onChange={e => setSearchField(e.target.value)}>{FIELD_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}</select>
         <input value={searchValue} onChange={e => setSearchValue(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') handleSearch(); }} placeholder="输入关键字，回车搜索历史报价" />
+        <select value={status} onChange={e => setStatus(e.target.value)} aria-label="按状态筛选">{STATUS_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select>
         <button type="button" className="primary-action" onClick={handleSearch}>搜索</button>
         <button type="button" className="secondary-action" onClick={handleReset}>重置</button>
       </div>
-      {loading ? <div className="console-empty">正在加载报价任务…</div> : quotes.length ? <div className="quote-table-wrap"><table className="quote-table"><thead><tr><th>零件任务</th><th>物料编码</th><th>材料</th><th>MOQ数量</th><th>参考总价</th><th>状态</th><th aria-label="操作" /></tr></thead><tbody>{quotes.map(quote => <tr key={quote.id}>
+      {loading ? <div className="console-empty">正在加载报价任务…</div> : quotes.length ? <><div className="quote-table-wrap"><table className="quote-table"><thead><tr><th>零件任务</th><th>物料编码</th><th>材料</th><th>数量</th><th>参考总价</th><th>状态</th><th aria-label="操作" /></tr></thead><tbody>{quotes.map(quote => <tr key={quote.id}>
         <td><strong>{quote.partName || '未命名零件'}</strong><small>任务 #{quote.id}</small></td>
         <td>{codeButton(quote.materialCode)}</td>
         <td>{quote.material || '-'}</td>
@@ -76,7 +90,7 @@ function QuoteList() {
         <td className="quote-price">{quote.calculation ? `¥${Number(quote.calculation.total).toFixed(2)}` : '待计算'}</td>
         <td><span className={`status-pill ${quote.status || 'draft'}`}>{statusMap[quote.status] || quote.status || '草稿'}</span></td>
         <td><Link className="table-view-link" to={`/quotes/${quote.id}`}>查看 -&gt;</Link></td>
-      </tr>)}</tbody></table></div> : <div className="quote-empty"><div className="empty-mark">+</div><h3>尚未创建报价任务</h3><p>从 AI 工作台上传图纸，或创建一份基础报价开始。</p><Link className="primary-action link-action" to="/quotes/ai-new">创建首个分析任务</Link></div>}
+      </tr>)}</tbody></table></div><div className="quote-pagination"><span>第 {pagination.page} / {pagination.totalPages} 页，共 {pagination.total} 条</span><div><button type="button" className="secondary-action" disabled={pagination.page <= 1} onClick={() => loadQuotes(currentFilters(pagination.page - 1))}>上一页</button><button type="button" className="secondary-action" disabled={pagination.page >= pagination.totalPages} onClick={() => loadQuotes(currentFilters(pagination.page + 1))}>下一页</button></div></div></> : <div className="quote-empty"><div className="empty-mark">+</div><h3>尚未创建报价任务</h3><p>从 AI 工作台上传图纸，或创建一份基础报价开始。</p><Link className="primary-action link-action" to="/quotes/ai-new">创建首个分析任务</Link></div>}
     </section>
 
     {trace.open && <>
