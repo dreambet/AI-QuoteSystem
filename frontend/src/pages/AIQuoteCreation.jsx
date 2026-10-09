@@ -1277,11 +1277,8 @@ function AIQuoteCreation() {
       else setError(err.response?.data?.error || err.message || '图纸分析失败');
     } finally { setLoading(false); }
   };
-  const applyDrawingSuggestions = (requestedSuggestions) => {
-    const suggestions = requestedSuggestions || analysisResult?.processSuggestions || [];
-    let applied = 0;
-    suggestions.forEach(suggestion => {
-      const process = (catalog.processes || []).find(item => item.code === suggestion.processCode) || (catalog.processes || []).find(item => {
+  const resolveSuggestedProcess = suggestion => {
+    const process = (catalog.processes || []).find(item => item.code === suggestion.processCode) || (catalog.processes || []).find(item => {
         const text = `${item.code || ''} ${item.name || ''}`.toLowerCase();
         if (suggestion.processType === 'cncMilling') return /cnc|加工中心|铣/.test(text);
         if (suggestion.processType === 'drilling' || suggestion.processType === 'drillingReview') return /钻|孔|攻牙/.test(text);
@@ -1291,35 +1288,66 @@ function AIQuoteCreation() {
         if (suggestion.processType === 'surfaceReview') return /五轴|多轴|曲面/.test(text);
         return false;
       });
-      const target = process && process.costType === 'time' ? process : {
-        code: `TMP-${suggestion.id}`,
+    return process && process.costType === 'time' ? process : {
+        // 同一未配置工艺类型在“采纳全部”时也应合并，而不是为每条建议新建一项。
+        code: `TMP-${suggestion.processCode || suggestion.processType || suggestion.name || suggestion.id}`,
         name: suggestion.name,
         costType: 'time',
         hourlyRate: null,
         temporary: true
       };
-      if (target.temporary) {
-        setTemporaryProcesses(current => current.some(item => item.code === target.code) ? current : [...current, target]);
-      }
-      setProcessInputs(current => ({
-        ...current,
-        [target.code]: {
-          ...(current[target.code] || {}),
-          minutes: String(suggestion.minutes),
-          suggestion: {
-            id: suggestion.id,
-            source: suggestion.source === 'ai' ? 'AI 工艺初稿（已确认）' : '图纸自动建议（已确认）',
-            processType: suggestion.processType || '',
-            basis: suggestion.basis,
-            calculationInputs: suggestion.calculationInputs || {},
-            timeFormula: suggestion.timeFormula || '',
-            costFormula: suggestion.costFormula || '',
-            featureIds: suggestion.featureIds || [],
-            confidence: suggestion.confidence
-          }
-        }
-      }));
-      applied += 1;
+  };
+  const buildSuggestionSnapshot = suggestions => {
+    const first = suggestions[0] || {};
+    const featureIds = [...new Set(suggestions.flatMap(item => item.featureIds || []))];
+    const bases = [...new Set(suggestions.map(item => item.basis).filter(Boolean))];
+    return {
+      id: suggestions.map(item => item.id).filter(Boolean).join(',') || first.id,
+      source: suggestions.every(item => item.source === 'ai') ? 'AI 工艺初稿（已确认）' : '图纸自动建议（已确认）',
+      processType: first.processType || '',
+      basis: bases.join('；'),
+      calculationInputs: first.calculationInputs || {},
+      timeFormula: suggestions.length > 1 ? `已合并 ${suggestions.length} 条同类 AI 工艺建议的时长` : (first.timeFormula || ''),
+      costFormula: first.costFormula || '',
+      featureIds,
+      confidence: Math.max(...suggestions.map(item => num(item.confidence)))
+    };
+  };
+  const applyDrawingSuggestions = (requestedSuggestions) => {
+    const applyAll = !requestedSuggestions;
+    const suggestions = requestedSuggestions || analysisResult?.processSuggestions || [];
+    // “采纳全部”只带入置信度不低于 60% 的建议；单条采纳保持人工可自主决定的原有行为。
+    const accepted = applyAll ? suggestions.filter(item => num(item.confidence) >= 0.6) : suggestions;
+    if (!accepted.length) {
+      setError(applyAll ? '没有置信度达到 60% 的候选工序可采纳，请逐条确认。' : '没有可采纳的候选工序。');
+      return;
+    }
+    const grouped = new Map();
+    accepted.forEach(suggestion => {
+      const target = resolveSuggestedProcess(suggestion);
+      const current = grouped.get(target.code) || { target, suggestions: [], minutes: 0 };
+      current.suggestions.push(suggestion);
+      current.minutes += num(suggestion.minutes);
+      grouped.set(target.code, current);
+    });
+    const groups = [...grouped.values()];
+    const temporary = groups.map(item => item.target).filter(item => item.temporary);
+    if (temporary.length) {
+      setTemporaryProcesses(current => {
+        const known = new Set(current.map(item => item.code));
+        return [...current, ...temporary.filter(item => !known.has(item.code))];
+      });
+    }
+    setProcessInputs(current => {
+      const next = { ...current };
+      groups.forEach(({ target, suggestions: mergedSuggestions, minutes }) => {
+        next[target.code] = {
+          ...(next[target.code] || {}),
+          minutes: String(minutes),
+          suggestion: buildSuggestionSnapshot(mergedSuggestions)
+        };
+      });
+      return next;
     });
     setError(null);
     setProcessModalOpen(true);

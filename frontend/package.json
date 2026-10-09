@@ -1,17 +1,18 @@
-
 {
   "name": "machining-quote-frontend",
   "version": "1.0.0",
   "private": true,
   "dependencies": {
+    "@react-three/drei": "^9.92.0",
+    "@react-three/fiber": "^8.15.0",
+    "axios": "^1.6.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
+    "react-markdown": "^9.1.0",
     "react-router-dom": "^6.20.0",
     "react-scripts": "5.0.1",
-    "axios": "^1.6.0",
-    "three": "^0.160.0",
-    "@react-three/fiber": "^8.15.0",
-    "@react-three/drei": "^9.92.0"
+    "remark-gfm": "^4.0.1",
+    "three": "^0.160.0"
   },
   "scripts": {
     "start": "react-scripts start",
@@ -20,9 +21,23 @@
     "eject": "react-scripts eject"
   },
   "browserslist": {
-    "production": [">0.2%", "not dead", "not op_mini all"],
-    "development": ["last 1 chrome version", "last 1 firefox version", "last 1 safari version"]
+    "production": [
+      ">0.2%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 1 chrome version",
+      "last 1 firefox version",
+      "last 1 safari version"
+    ]
   },
-  "proxy": "http://localhost:3001"
+  "proxy": "http://localhost:3001",
+  "jest": {
+    "transformIgnorePatterns": [],
+    "moduleNameMapper": {
+      "^unist-util-visit-parents/do-not-use-color$": "<rootDir>/node_modules/unist-util-visit-parents/lib/color.js",
+      "^#min(path|proc|url)$": "<rootDir>/node_modules/vfile/lib/min$1.browser.js"
+    }
+  }
 }
-

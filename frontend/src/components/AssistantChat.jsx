@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import AssistantMarkdown from './AssistantMarkdown.jsx';
 
 const STORAGE_PREFIX = 'machining-console-assistant';
 const USER_KEY = `${STORAGE_PREFIX}:user`;
@@ -110,9 +111,13 @@ export default function AssistantChat() {
     let receivedContent = false;
 
     try {
+      const authToken = sessionStorage.getItem('machining_quote_auth_token');
       const response = await fetch('/api/assistant/chat', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {})
+        },
         body: JSON.stringify({ query, conversationId: conversationId || undefined, userId }),
         signal: controller.signal
       });
@@ -196,7 +201,11 @@ export default function AssistantChat() {
             {displayedMessages.map(message => (
               <article className={`assistant-message ${message.role}`} key={message.id}>
                 <span className="assistant-message-role">{message.role === 'user' ? '您' : 'AI'}</span>
-                <p>{message.content || (message.streaming ? <span className="assistant-typing">正在思考</span> : '')}</p>
+                {message.role === 'assistant' && message.content ? (
+                  <AssistantMarkdown content={message.content} />
+                ) : (
+                  <p>{message.content || (message.streaming ? <span className="assistant-typing">正在思考</span> : '')}</p>
+                )}
               </article>
             ))}
             {error && <div className="assistant-error"><span>{error}</span><button type="button" onClick={() => sendMessage(lastQuery, false)} disabled={!lastQuery || isStreaming}>重新尝试</button></div>}

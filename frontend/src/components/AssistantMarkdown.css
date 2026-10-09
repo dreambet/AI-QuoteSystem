@@ -1,0 +1,81 @@
+.assistant-message .assistant-markdown {
+  min-width: 0;
+  max-width: 82%;
+  box-sizing: border-box;
+  padding: 10px 11px;
+  border: 1px solid rgba(103, 179, 206, .16);
+  border-radius: 4px 11px 11px 11px;
+  color: #c6dce8;
+  background: rgba(15, 45, 65, .78);
+  font-size: 12px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+
+/* Paragraphs belong inside the bubble; the legacy chat p rule styles a bubble. */
+.assistant-message .assistant-markdown p {
+  max-width: none;
+  margin: 0 0 10px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  color: inherit;
+  background: none;
+  font: inherit;
+  white-space: pre-wrap;
+  word-break: normal;
+}
+
+.assistant-markdown :is(h1, h2, h3, h4, h5, h6) {
+  margin: 14px 0 7px;
+  color: #e9fcff;
+  font-size: 14px;
+  line-height: 1.5;
+  font-weight: 700;
+}
+
+.assistant-markdown h1 { font-size: 16px; }
+.assistant-markdown strong { color: #ecfcff; font-weight: 700; }
+.assistant-markdown :is(ul, ol) { margin: 7px 0 10px; padding-left: 22px; }
+.assistant-markdown li { margin: 5px 0; }
+.assistant-markdown li::marker { color: #6edbe8; }
+.assistant-message .assistant-markdown li > p { margin-bottom: 5px; }
+.assistant-markdown li :is(ul, ol) { margin: 5px 0; }
+.assistant-markdown blockquote {
+  margin: 10px 0;
+  padding: 7px 10px;
+  border-left: 3px solid #49afc2;
+  color: #a8c9d7;
+  background: rgba(41, 115, 137, .12);
+}
+.assistant-markdown a { color: #72e3ef; text-decoration: underline; text-underline-offset: 3px; }
+.assistant-markdown a:hover { color: #d5fcff; }
+.assistant-markdown :is(a, .assistant-table-scroll):focus-visible { outline: 2px solid #6ff5fb; outline-offset: 2px; }
+.assistant-markdown code { padding: 1px 4px; border-radius: 4px; color: #a8eff4; background: rgba(3, 16, 28, .65); font: .95em/1.6 Consolas, monospace; }
+.assistant-markdown pre {
+  max-width: 100%;
+  margin: 10px 0;
+  padding: 10px;
+  overflow-x: auto;
+  border: 1px solid rgba(103, 179, 206, .2);
+  border-radius: 6px;
+  background: #071b2b;
+  white-space: pre;
+  overflow-wrap: normal;
+}
+.assistant-markdown pre code { padding: 0; background: none; }
+.assistant-markdown hr { margin: 12px 0; border: 0; border-top: 1px solid rgba(103, 179, 206, .3); }
+.assistant-table-scroll { max-width: 100%; overflow-x: auto; margin: 10px 0; }
+.assistant-markdown table { width: 100%; border-collapse: collapse; font-size: inherit; }
+.assistant-markdown :is(th, td) { min-width: 70px; padding: 6px 8px; border: 1px solid rgba(103, 179, 206, .25); vertical-align: top; }
+.assistant-markdown th { color: #e9fcff; background: rgba(38, 117, 139, .25); }
+.assistant-markdown :is(pre, .assistant-table-scroll) { scrollbar-width: thin; scrollbar-color: #2c6b85 transparent; }
+.assistant-markdown :is(pre, .assistant-table-scroll)::-webkit-scrollbar { height: 6px; }
+.assistant-markdown :is(pre, .assistant-table-scroll)::-webkit-scrollbar-thumb { border-radius: 8px; background: #2c6b85; }
+.assistant-markdown > :first-child { margin-top: 0; }
+.assistant-message .assistant-markdown > :last-child,
+.assistant-message .assistant-markdown blockquote > :last-child { margin-bottom: 0; }
+
+@media (max-width: 700px) {
+  .assistant-message .assistant-markdown { max-width: 85%; }
+}
